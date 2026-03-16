@@ -228,23 +228,6 @@ Default severity is `HARD_STOP`.  Override per-constraint via `constraint_severi
 
 ---
 
-## MCP Servers
-
-### FileSystemMCPServer
-
-Path-isolated file system access over streamable-http:
-
-```python
-from agentltl.integrations.smolagents import FileSystemMCPServer
-
-server = FileSystemMCPServer(base_path="/data/project")
-server.run(transport="streamable-http", port=4000)
-```
-
-Tools exposed: `list_files(directory)`, `read_file(filepath, chunk_size, chunk_number)`.
-
----
-
 ## Examples
 
 | Example | Description |
@@ -254,16 +237,18 @@ Tools exposed: `list_files(directory)`, `read_file(filepath, chunk_size, chunk_n
 | `examples/03_linear_chain_agent.py` | A→B→C ordering with `AgentWithConstraints` |
 | `examples/04_loop_termination_agent.py` | Polling loop compliance with `CalledNTimes` + `Predicate` |
 | `examples/05_fan_out_fan_in_agent.py` | Fan-out/fan-in with `AllBefore` gate |
+| `examples/06_mcp_tools_agent.py` | `AgentWithAdditionalTools` with an inline MCP server; multi-server and mixed local+MCP patterns |
 
 Run any example:
 
 ```bash
 cd agentltl
-pip install -e ".[smolagents]"
+pip install -e ".[smolagents]" fastmcp
 python examples/01_post_hoc_verification.py  # no LLM required
 python examples/02_foltl_formulas.py         # no LLM required
 export HF_TOKEN=...
 python examples/03_linear_chain_agent.py     # requires HF_TOKEN
+python examples/06_mcp_tools_agent.py        # requires HF_TOKEN + fastmcp
 ```
 
 ---

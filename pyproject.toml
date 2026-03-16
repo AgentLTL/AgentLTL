@@ -29,7 +29,6 @@ dependencies = []
 smolagents = [
     "smolagents>=1.22.0",
     "mcpadapt>=0.1.13",
-    "fastmcp",
 ]
 dev = [
     "pytest>=7.0",

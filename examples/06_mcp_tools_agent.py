@@ -1,5 +1,5 @@
 """
-06_mcp_tools_agent.py – AgentWithAdditionalTools with MCP server connectivity.
+06_mcp_tools_agent.py – AgentWithAdditionalTools with an inline MCP server.
 
 Demonstrates the ``mcp_servers`` dict introduced in this release.  The agent
 connects to one or more MCP servers at startup; each server is opened as an
@@ -8,11 +8,13 @@ independent connection so a failure in one does not prevent the others loading.
 This example:
 
 1. Creates a temporary directory with sample files.
-2. Starts a ``FileSystemMCPServer`` in a background daemon thread (port 4000).
-3. Builds an ``AgentWithAdditionalTools`` that connects to it via the
+2. Defines a minimal ``FastMCP`` server in-process that exposes two tools:
+   ``list_files`` and ``read_file``.
+3. Starts that server in a background daemon thread (port 4000).
+4. Builds an ``AgentWithAdditionalTools`` that connects to it via the
    ``mcp_servers`` dict — no tool classes required on the Python side.
-4. Runs a file-exploration task using the MCP-exposed tools.
-5. Shows a two-server configuration pattern in comments.
+5. Runs a file-exploration task using the MCP-exposed tools.
+6. Shows a two-server configuration pattern in comments.
 
 MCP server config dict keys
 ---------------------------
@@ -33,7 +35,7 @@ Passed directly to smolagents' ``MCPClient``.  Common keys:
     }
 
 Requirements:
-    pip install agentltl[smolagents]
+    pip install agentltl[smolagents] fastmcp
     export HF_TOKEN=...
 
 Run:
@@ -46,9 +48,41 @@ import tempfile
 import threading
 import time
 
-from agentltl.integrations.smolagents import AgentWithAdditionalTools, FileSystemMCPServer
+import fastmcp
+
+from agentltl.integrations.smolagents import AgentWithAdditionalTools
 
 MCP_PORT = 4000
+
+
+# ── Inline MCP server definition ──────────────────────────────────────────────
+
+def build_fs_server(base_path: str) -> fastmcp.FastMCP:
+    """Return a FastMCP server exposing list_files and read_file under *base_path*."""
+    mcp = fastmcp.FastMCP("file-explorer")
+
+    @mcp.tool()
+    def list_files(directory: str = "") -> list[str]:
+        """List files and directories inside *directory* (relative to base_path)."""
+        target = os.path.join(base_path, directory.lstrip("/"))
+        if not os.path.isdir(target):
+            return [f"[error] not a directory: {directory!r}"]
+        entries = []
+        for name in sorted(os.listdir(target)):
+            full = os.path.join(target, name)
+            entries.append(name + ("/" if os.path.isdir(full) else ""))
+        return entries
+
+    @mcp.tool()
+    def read_file(filepath: str) -> str:
+        """Return the text contents of *filepath* (relative to base_path)."""
+        target = os.path.join(base_path, filepath.lstrip("/"))
+        if not os.path.isfile(target):
+            return f"[error] file not found: {filepath!r}"
+        with open(target) as fh:
+            return fh.read()
+
+    return mcp
 
 
 # ── Server lifecycle helpers ───────────────────────────────────────────────────
@@ -65,26 +99,24 @@ def _wait_for_port(port: int, host: str = "localhost", timeout: float = 15.0) ->
     return False
 
 
-def start_fs_server(base_path: str, port: int) -> threading.Thread:
-    """Start a FileSystemMCPServer in a background daemon thread.
+def start_mcp_server(base_path: str, port: int) -> threading.Thread:
+    """Start the inline file-explorer MCP server in a background daemon thread.
 
-    The function blocks until the server is accepting connections (or raises
-    ``RuntimeError`` if it does not start within the timeout).
+    Blocks until the server is accepting connections (or raises ``RuntimeError``).
     """
-    server = FileSystemMCPServer(base_path=base_path)
+    mcp = build_fs_server(base_path)
     thread = threading.Thread(
-        target=server.run,
+        target=mcp.run,
         kwargs={"transport": "streamable-http", "port": port},
-        daemon=True,   # thread exits automatically when the main process ends
-        name=f"fs-mcp-{port}",
+        daemon=True,
+        name=f"mcp-fs-{port}",
     )
     thread.start()
     if not _wait_for_port(port):
         raise RuntimeError(
-            f"FileSystemMCPServer did not become reachable on port {port} "
-            f"within the timeout.  Check for port conflicts."
+            f"MCP server did not become reachable on port {port} within the timeout."
         )
-    print(f"[server] FileSystemMCPServer ready → http://localhost:{port}/mcp")
+    print(f"[server] file-explorer MCP server ready → http://localhost:{port}/mcp")
     return thread
 
 
@@ -115,8 +147,8 @@ def main():
     sample_dir = create_sample_directory()
     print(f"[setup] Sample directory: {sample_dir}")
 
-    # ── 2. Start MCP server ──────────────────────────────────────────────────
-    start_fs_server(base_path=sample_dir, port=MCP_PORT)
+    # ── 2. Start inline MCP server ───────────────────────────────────────────
+    start_mcp_server(base_path=sample_dir, port=MCP_PORT)
 
     # ── 3. Build the agent ───────────────────────────────────────────────────
     # The mcp_servers dict maps a human-readable name → MCPClient config dict.

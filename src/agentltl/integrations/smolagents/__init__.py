@@ -10,8 +10,6 @@ Provides:
 * :class:`Agent`, :class:`AgentWithAdditionalTools`, :class:`AgentWithSubAgents`,
   :class:`AgentWithConstraints` – higher-level agent wrappers with metrics
   extraction and optional MCP server connectivity.
-* :class:`FileSystemMCPServer`, :class:`KnowledgeGraphMCPServer` – FastMCP
-  servers for file system and knowledge graph access.
 
 Install with::
 
@@ -33,8 +31,6 @@ from .agents import (
     MCPServerConfig,
 )
 
-from .mcps import FileSystemMCPServer
-
 __all__ = [
     "ToolCallingAgentWithConstraints",
     "ConstraintSeverity",
@@ -45,5 +41,4 @@ __all__ = [
     "AgentWithSubAgents",
     "AgentWithConstraints",
     "MCPServerConfig",
-    "FileSystemMCPServer",
 ]
