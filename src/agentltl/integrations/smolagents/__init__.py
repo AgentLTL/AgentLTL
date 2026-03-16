@@ -30,6 +30,7 @@ from .agents import (
     AgentWithAdditionalTools,
     AgentWithSubAgents,
     AgentWithConstraints,
+    MCPServerConfig,
 )
 
 from .mcps import FileSystemMCPServer
@@ -43,5 +44,6 @@ __all__ = [
     "AgentWithAdditionalTools",
     "AgentWithSubAgents",
     "AgentWithConstraints",
+    "MCPServerConfig",
     "FileSystemMCPServer",
 ]

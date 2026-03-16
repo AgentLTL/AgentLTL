@@ -1,54 +1,116 @@
 """
 agentltl/integrations/smolagents/agents.py – smolagents agent wrappers.
 
-Provides four agent classes built on top of smolagents' :class:`ToolCallingAgent`:
+Agent hierarchy
+---------------
+``Agent``
+    Base agent.  Accepts a list of :class:`Tool` instances directly.
+    No MCP connectivity.  All shared logic (metrics extraction, run loop,
+    resource cleanup) lives here.
 
-* :class:`Agent` – base agent with MCP connectivity and metrics extraction.
-* :class:`AgentWithAdditionalTools` – adds custom :class:`Tool` instances.
-* :class:`AgentWithSubAgents` – spawns per-requirement sub-agents and aggregates.
-* :class:`AgentWithConstraints` – pre-execution FOLTL constraint enforcement.
+``AgentWithAdditionalTools``
+    Extends :class:`Agent` with multi-server MCP connectivity and optional
+    extra local :class:`Tool` instances.  Pass *mcp_servers* as a dict that
+    maps a human-readable name to a server configuration dict::
 
-All agents return a standardised ``{"answer", "metrics", "error"}`` dict from
-their :meth:`run` method.  Metrics include per-step reasoning, tool calls,
-timings, and token usage.
+        mcp_servers = {
+            "filesystem": {
+                "url": "http://localhost:4000/mcp",
+                "transport": "streamable-http",
+            },
+            "knowledge_graph": {
+                "url": "http://localhost:4001/mcp",
+                "transport": "streamable-http",
+                "headers": {"Authorization": "Bearer <token>"},
+            },
+        }
+
+    One :class:`MCPClient` is opened per entry; a failure in one server is
+    logged as a warning and the remaining servers continue loading.
+
+``AgentWithSubAgents``
+    Spawns a fresh :class:`AgentWithAdditionalTools` per requirement and
+    aggregates results.  Stores the MCP server config and tools list to
+    forward them to each sub-agent.
+
+``AgentWithConstraints``
+    Pre-execution FOLTL constraint enforcement via
+    :class:`ToolCallingAgentWithConstraints`.  Accepts the same tool / MCP
+    parameters as :class:`AgentWithAdditionalTools` plus constraint config.
+
+All ``run()`` methods return ``{"answer", "metrics", "error"}``.
+See ``docs/reference.md`` for the full return-value schema.
 
 Environment variables
 ---------------------
-* ``MODEL``                  – model name (default: ``Qwen/Qwen3-Next-80B-A3B-Instruct``)
-* ``MODEL_TYPE``             – ``hf_inference`` (default) or ``vllm`` / ``openai_server``
-* ``VLLM_BASE_URL``          – OpenAI-compatible endpoint (default: ``http://localhost:8000/v1``)
-* ``HF_TOKEN``               – Hugging Face API token
-* ``HF_INFERENCE_PROVIDER``  – Provider for HF Inference API (default: ``novita``)
-* ``HF_BILL_TO``             – Optional billing organisation
+``MODEL``                  – model name (default: ``Qwen/Qwen3-Next-80B-A3B-Instruct``)
+``MODEL_TYPE``             – ``hf_inference`` (default) | ``vllm`` | ``openai_server``
+``VLLM_BASE_URL``          – OpenAI-compatible base URL (default: ``http://localhost:8000/v1``)
+``HF_TOKEN``               – HuggingFace API token
+``HF_INFERENCE_PROVIDER``  – HF Inference provider (default: ``novita``)
+``HF_BILL_TO``             – Optional billing organisation
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from smolagents import ToolCallingAgent, InferenceClientModel, OpenAIServerModel, MCPClient, Tool
+from smolagents import (
+    InferenceClientModel,
+    MCPClient,
+    OpenAIServerModel,
+    Tool,
+    ToolCallingAgent,
+)
 
-from .constrained_agent import ToolCallingAgentWithConstraints, ConstraintSeverity
+from .constrained_agent import ConstraintSeverity, ToolCallingAgentWithConstraints
 
+logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Type alias
+# ─────────────────────────────────────────────────────────────────────────────
+
+# A server config dict as accepted by smolagents MCPClient.
+# Minimum required keys depend on transport:
+#   HTTP  → {"url": str, "transport": "streamable-http" | "sse"}
+#            optional: {"headers": dict, "timeout": float}
+#   stdio → {"command": str, "args": list[str], "env": dict}
+MCPServerConfig = Dict[str, Any]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model factory
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _create_model(
     model: Optional[str] = None,
     api_key: Optional[str] = None,
     provider: Optional[str] = None,
     model_seed: Optional[int] = None,
-):
-    """Create an LLM model instance.
+) -> Any:
+    """Create and return an LLM model instance.
 
-    * ``MODEL_TYPE=vllm`` (or ``openai_server``): :class:`OpenAIServerModel` at ``VLLM_BASE_URL``
-    * ``MODEL_TYPE=hf_inference`` (default): :class:`InferenceClientModel` via HF Inference API
+    Selects the backend based on the ``MODEL_TYPE`` environment variable:
+
+    * ``vllm`` / ``openai_server`` / ``openai``
+      → :class:`OpenAIServerModel` pointing at ``$VLLM_BASE_URL``.
+    * ``hf_inference`` (default)
+      → :class:`InferenceClientModel` via the HuggingFace Inference API.
 
     Args:
-        model: Model name override.
-        api_key: API key.
-        provider: HF Inference provider (e.g. ``"novita"``).
-        model_seed: Optional reproducibility seed.
+        model:       Model name / ID.  Falls back to ``$MODEL``, then the
+                     built-in default.
+        api_key:     API key for the model provider.  Falls back to
+                     ``$HF_TOKEN``.
+        provider:    HF Inference provider name.  Falls back to
+                     ``$HF_INFERENCE_PROVIDER``, then ``"novita"``.
+        model_seed:  Optional seed forwarded to the model for reproducible
+                     sampling (supported by both backends).
     """
     model_name = model or os.getenv("MODEL") or "Qwen/Qwen3-Next-80B-A3B-Instruct"
     model_type = os.getenv("MODEL_TYPE", "hf_inference").lower()
@@ -56,11 +118,9 @@ def _create_model(
     if model_type in ("vllm", "openai_server", "openai"):
         vllm_base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
         vllm_api_key = os.getenv("VLLM_API_KEY", "dummy")
-        extra: Dict[str, Any] = {}
+        extra: Dict[str, Any] = {"tool_choice": "any"}
         if model_seed is not None:
             extra["seed"] = model_seed
-        if "tool_choice" not in extra:
-            extra["tool_choice"] = "any"
         return OpenAIServerModel(
             model_id=model_name,
             api_base=vllm_base_url,
@@ -68,15 +128,15 @@ def _create_model(
             **extra,
         )
 
-    api_key = api_key or os.getenv("HF_TOKEN")
-    provider = provider or os.getenv("HF_INFERENCE_PROVIDER") or "novita"
+    # HuggingFace Inference API (default)
+    resolved_api_key = api_key or os.getenv("HF_TOKEN")
+    resolved_provider = provider or os.getenv("HF_INFERENCE_PROVIDER") or "novita"
     model_kwargs: Dict[str, Any] = {
         "model_id": model_name,
-        "token": api_key,
+        "token": resolved_api_key,
+        "provider": resolved_provider,
     }
-    if provider:
-        model_kwargs["provider"] = provider
-    bill_to_org = os.environ.get("HF_BILL_TO") or "EPITA"
+    bill_to_org = os.environ.get("HF_BILL_TO")
     if bill_to_org:
         model_kwargs["bill_to"] = bill_to_org
     if model_seed is not None:
@@ -84,82 +144,166 @@ def _create_model(
     return InferenceClientModel(**model_kwargs)
 
 
-class Agent:
-    """Base agent with MCP connectivity and per-step metrics extraction.
+# ─────────────────────────────────────────────────────────────────────────────
+# MCP connectivity helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _connect_mcp_servers(
+    mcp_servers: Dict[str, MCPServerConfig],
+) -> Tuple[List[MCPClient], List[Tool]]:
+    """Open connections to all MCP servers and collect their tools.
+
+    Each entry in *mcp_servers* is opened as a separate :class:`MCPClient`
+    so that a failure in one server does not prevent the others from loading.
 
     Args:
-        mcp_server_url: URL of the MCP server (streamable-http transport).
-            Falls back to the ``MCP_SERVER_URL`` environment variable.
-        model: Model name.
-        api_key: API key.
-        provider: Model provider.
-        max_steps: Maximum agent steps.
+        mcp_servers: ``{human_readable_name: server_config_dict}`` where the
+                     config dict is passed directly to :class:`MCPClient`.
+
+    Returns:
+        A ``(clients, tools)`` tuple where *clients* is the list of open
+        :class:`MCPClient` instances (kept for cleanup in ``__del__``) and
+        *tools* is the flat ordered list of :class:`Tool` objects exposed
+        across all servers, in the iteration order of *mcp_servers*.
+    """
+    clients: List[MCPClient] = []
+    all_tools: List[Tool] = []
+
+    for name, server_config in mcp_servers.items():
+        try:
+            client = MCPClient(server_config, structured_output=False)
+            tools = client.__enter__()
+            clients.append(client)
+            all_tools.extend(tools)
+            logger.debug(
+                "MCP server %r connected: %d tool(s) available.",
+                name,
+                len(tools),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to connect to MCP server %r — skipping. "
+                "Check the server URL and transport settings.",
+                name,
+                exc_info=True,
+            )
+
+    return clients, all_tools
+
+
+def _disconnect_mcp_clients(clients: List[MCPClient]) -> None:
+    """Best-effort cleanup of all open MCP client connections."""
+    for client in clients:
+        try:
+            client.__exit__(None, None, None)
+        except Exception:
+            logger.debug("Error while closing MCP client.", exc_info=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Base agent
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Agent:
+    """Base agent backed by a :class:`ToolCallingAgent`.
+
+    Takes a list of :class:`Tool` instances directly — no MCP connectivity.
+    All shared logic (metrics extraction, run loop, resource cleanup) lives
+    here so subclasses can inherit it without duplication.
+
+    Args:
+        tools:          Tool instances to expose to the agent.  ``None`` or
+                        an empty list creates an agent with no tools.
+        model:          Model name / ID.  See :func:`_create_model`.
+        api_key:        API key for the model provider.
+        provider:       HF Inference provider name.
+        max_steps:      Maximum agent steps before forced termination.
+        model_seed:     Optional seed for reproducible sampling.
+        model_instance: Pre-constructed model object.  When supplied,
+                        *model*, *api_key*, *provider*, and *model_seed*
+                        are ignored.
     """
 
     def __init__(
         self,
-        mcp_server_url: str,
+        tools: Optional[List[Tool]] = None,
         model: Optional[str] = None,
         api_key: Optional[str] = None,
         provider: Optional[str] = None,
         max_steps: int = 10,
-    ):
-        self._model = _create_model(model, api_key, provider)
+        model_seed: Optional[int] = None,
+        model_instance: Optional[Any] = None,
+    ) -> None:
+        self._model = (
+            model_instance
+            if model_instance is not None
+            else _create_model(model, api_key, provider, model_seed)
+        )
+        # Subclasses that add MCP clients store them here for cleanup.
+        self._mcp_clients: List[MCPClient] = []
+        self.agent = ToolCallingAgent(
+            tools=list(tools or []),
+            model=self._model,
+            max_steps=max_steps,
+        )
 
-        mcp_server_url = mcp_server_url or os.environ.get("MCP_SERVER_URL")
-        self._mcp_client = None
-        tools = []
-
-        if mcp_server_url:
-            try:
-                self._mcp_client = MCPClient(
-                    {"url": mcp_server_url, "transport": "streamable-http"},
-                    structured_output=False,
-                )
-                tools = self._mcp_client.__enter__()
-            except Exception as e:
-                print(f"Warning: Failed to initialize MCP client: {e}")
-                self._mcp_client = None
-
-        self.agent = ToolCallingAgent(tools=tools, model=self._model, max_steps=max_steps)
+    # ── Metrics extraction ───────────────────────────────────────────────────
 
     def _extract_metrics_from_steps(self, steps: List[Any]) -> Dict[str, Any]:
-        """Extract per-step metrics from smolagents execution steps.
+        """Extract per-step metrics from a smolagents execution step list.
 
         Captures: step type, reasoning text, thinking (chain-of-thought),
         tool calls, observations, timings, token usage, model input context.
+        See ``docs/reference.md`` for the full schema.
         """
-        def get_value(obj, key, default=None):
+
+        def get_value(obj: Any, key: str, default: Any = None) -> Any:
             if isinstance(obj, dict):
                 return obj.get(key, default)
             return getattr(obj, key, default)
 
-        def role_str(role):
+        def role_str(role: Any) -> Optional[str]:
             if role is None:
                 return None
             return role.value if hasattr(role, "value") else str(role)
 
-        def serialize_tool_calls_from_message(tool_calls):
+        def serialize_tool_calls_from_message(tool_calls: Any) -> Optional[List[Dict]]:
             if not tool_calls:
                 return None
             result = []
             for tc in tool_calls:
                 func = get_value(tc, "function")
                 if func:
-                    tc_name = get_value(func, "name") if isinstance(func, dict) else getattr(func, "name", None)
-                    tc_args = get_value(func, "arguments") if isinstance(func, dict) else getattr(func, "arguments", None)
-                    tc_desc = get_value(func, "description") if isinstance(func, dict) else getattr(func, "description", None)
+                    tc_name = (
+                        get_value(func, "name")
+                        if isinstance(func, dict)
+                        else getattr(func, "name", None)
+                    )
+                    tc_args = (
+                        get_value(func, "arguments")
+                        if isinstance(func, dict)
+                        else getattr(func, "arguments", None)
+                    )
+                    tc_desc = (
+                        get_value(func, "description")
+                        if isinstance(func, dict)
+                        else getattr(func, "description", None)
+                    )
                 else:
                     tc_name = get_value(tc, "name")
                     tc_args = get_value(tc, "arguments")
                     tc_desc = None
-                entry = {"id": get_value(tc, "id"), "name": tc_name, "arguments": tc_args}
+                entry: Dict[str, Any] = {
+                    "id": get_value(tc, "id"),
+                    "name": tc_name,
+                    "arguments": tc_args,
+                }
                 if tc_desc:
                     entry["description"] = tc_desc
                 result.append(entry)
             return result
 
-        def serialize_content(content):
+        def serialize_content(content: Any) -> Any:
             if content is None:
                 return None
             if isinstance(content, str):
@@ -168,11 +312,13 @@ class Agent:
                 serialized = []
                 for block in content:
                     if isinstance(block, dict):
-                        serialized.append({k: v for k, v in block.items()})
+                        serialized.append(dict(block))
                     else:
-                        block_dict = {}
-                        for field in ("type", "text", "thinking", "image_url",
-                                      "tool_use_id", "tool_name", "id", "input"):
+                        block_dict: Dict[str, Any] = {}
+                        for field in (
+                            "type", "text", "thinking", "image_url",
+                            "tool_use_id", "tool_name", "id", "input",
+                        ):
                             val = get_value(block, field)
                             if val is not None:
                                 block_dict[field] = val
@@ -180,8 +326,8 @@ class Agent:
                 return serialized
             return str(content)
 
-        def serialize_message(msg):
-            serialized = {
+        def serialize_message(msg: Any) -> Dict[str, Any]:
+            serialized: Dict[str, Any] = {
                 "role": role_str(get_value(msg, "role")),
                 "content": serialize_content(get_value(msg, "content")),
             }
@@ -190,17 +336,18 @@ class Agent:
                 serialized["tool_calls"] = tcs
             tu = get_value(msg, "token_usage")
             if tu is not None:
-                if isinstance(tu, dict):
-                    serialized["token_usage"] = tu
-                else:
-                    serialized["token_usage"] = {
+                serialized["token_usage"] = (
+                    tu
+                    if isinstance(tu, dict)
+                    else {
                         "input_tokens": getattr(tu, "input_tokens", 0),
                         "output_tokens": getattr(tu, "output_tokens", 0),
                         "total_tokens": getattr(tu, "total_tokens", 0),
                     }
+                )
             return serialized
 
-        def extract_text_from_content(content):
+        def extract_text_from_content(content: Any) -> str:
             if content is None:
                 return ""
             if isinstance(content, str):
@@ -208,16 +355,24 @@ class Agent:
             if isinstance(content, list):
                 parts = []
                 for block in content:
-                    block_type = get_value(block, "type") if isinstance(block, dict) else getattr(block, "type", None)
+                    block_type = (
+                        get_value(block, "type")
+                        if isinstance(block, dict)
+                        else getattr(block, "type", None)
+                    )
                     if block_type in ("text", None):
-                        t = get_value(block, "text") if isinstance(block, dict) else getattr(block, "text", None)
+                        t = (
+                            get_value(block, "text")
+                            if isinstance(block, dict)
+                            else getattr(block, "text", None)
+                        )
                         if t:
                             parts.append(str(t))
                 return " ".join(parts)
             return str(content)
 
-        def parse_input_messages(messages):
-            parsed = {
+        def parse_input_messages(messages: List[Any]) -> Dict[str, Any]:
+            parsed: Dict[str, Any] = {
                 "num_messages": len(messages),
                 "approx_chars": 0,
                 "system_prompts": [],
@@ -225,31 +380,40 @@ class Agent:
                 "history": [],
             }
             for msg in messages:
-                role = role_str(get_value(msg, "role"))
+                r = role_str(get_value(msg, "role"))
                 content = get_value(msg, "content")
                 tool_calls = get_value(msg, "tool_calls")
                 text = extract_text_from_content(content)
                 parsed["approx_chars"] += len(text)
 
-                if role == "system":
+                if r == "system":
                     parsed["system_prompts"].append(text)
-                elif role == "user" and parsed["task"] is None:
+                elif r == "user" and parsed["task"] is None:
                     parsed["task"] = text
-                elif role == "tool-response":
-                    parsed["history"].append({"role": role, "type": "tool_result", "text": text, "tool_calls": None})
-                elif role in ("assistant", "tool-call"):
+                elif r == "tool-response":
+                    parsed["history"].append(
+                        {"role": r, "type": "tool_result", "text": text, "tool_calls": None}
+                    )
+                elif r in ("assistant", "tool-call"):
                     parsed_tcs = serialize_tool_calls_from_message(tool_calls)
-                    parsed["history"].append({
-                        "role": role,
-                        "type": "tool_call" if parsed_tcs else "reasoning",
-                        "text": text,
-                        "tool_calls": parsed_tcs,
-                    })
+                    parsed["history"].append(
+                        {
+                            "role": r,
+                            "type": "tool_call" if parsed_tcs else "reasoning",
+                            "text": text,
+                            "tool_calls": parsed_tcs,
+                        }
+                    )
                 else:
-                    parsed["history"].append({"role": role, "type": "message", "text": text, "tool_calls": None})
+                    parsed["history"].append(
+                        {"role": r, "type": "message", "text": text, "tool_calls": None}
+                    )
             return parsed
 
-        def extract_thinking(model_output_str, model_output_message):
+        def extract_thinking(
+            model_output_str: Optional[str],
+            model_output_message: Any,
+        ) -> Optional[str]:
             if model_output_str:
                 match = re.search(r"<think>(.*?)</think>", model_output_str, re.DOTALL)
                 if match:
@@ -258,38 +422,60 @@ class Agent:
                 content = get_value(model_output_message, "content")
                 if isinstance(content, list):
                     for block in content:
-                        block_type = get_value(block, "type") if isinstance(block, dict) else getattr(block, "type", None)
+                        block_type = (
+                            get_value(block, "type")
+                            if isinstance(block, dict)
+                            else getattr(block, "type", None)
+                        )
                         if block_type in ("thinking", "reasoning"):
                             t = (
-                                (get_value(block, "thinking") if isinstance(block, dict) else getattr(block, "thinking", None))
-                                or (get_value(block, "text") if isinstance(block, dict) else getattr(block, "text", None))
+                                (
+                                    get_value(block, "thinking")
+                                    if isinstance(block, dict)
+                                    else getattr(block, "thinking", None)
+                                )
+                                or (
+                                    get_value(block, "text")
+                                    if isinstance(block, dict)
+                                    else getattr(block, "text", None)
+                                )
                                 or ""
                             )
                             return t.strip() if t else None
             return None
 
-        def extract_tool_call_info(tc):
-            tool_name = None
-            tool_args = None
-            tool_id = None
+        def extract_tool_call_info(tc: Any) -> Dict[str, Any]:
+            tool_name: Optional[str] = None
+            tool_args: Any = None
             func = get_value(tc, "function")
             if func:
-                tool_name = get_value(func, "name") if isinstance(func, dict) else getattr(func, "name", None)
-                tool_args = get_value(func, "arguments") if isinstance(func, dict) else getattr(func, "arguments", None)
+                tool_name = (
+                    get_value(func, "name")
+                    if isinstance(func, dict)
+                    else getattr(func, "name", None)
+                )
+                tool_args = (
+                    get_value(func, "arguments")
+                    if isinstance(func, dict)
+                    else getattr(func, "arguments", None)
+                )
             if not tool_name:
-                for name_field in ["name", "tool_name", "function_name", "tool"]:
+                for name_field in ("name", "tool_name", "function_name", "tool"):
                     tool_name = get_value(tc, name_field)
                     if tool_name:
                         break
             if tool_args is None:
-                for arg_field in ["arguments", "args", "parameters", "inputs", "input"]:
+                for arg_field in ("arguments", "args", "parameters", "inputs", "input"):
                     tool_args = get_value(tc, arg_field)
                     if tool_args is not None:
                         break
-            tool_id = get_value(tc, "id")
-            return {"name": tool_name or "unknown", "arguments": tool_args if tool_args is not None else {}, "id": tool_id}
+            return {
+                "name": tool_name or "unknown",
+                "arguments": tool_args if tool_args is not None else {},
+                "id": get_value(tc, "id"),
+            }
 
-        metrics = {
+        metrics: Dict[str, Any] = {
             "num_steps": len(steps),
             "num_tool_calls": 0,
             "tool_calls": [],
@@ -300,7 +486,7 @@ class Agent:
         }
 
         for i, step in enumerate(steps):
-            step_info = {
+            step_info: Dict[str, Any] = {
                 "step_number": i + 1,
                 "type": None,
                 "reasoning": None,
@@ -320,6 +506,7 @@ class Agent:
                 "model_input_parsed": None,
             }
 
+            # Timings
             timing = get_value(step, "timing")
             if timing is not None:
                 step_info["start_time"] = get_value(timing, "start_time")
@@ -331,21 +518,27 @@ class Agent:
                     if val is not None:
                         step_info[time_field] = val
 
+            # Token usage
             step_tokens = get_value(step, "token_usage")
             if step_tokens:
-                if isinstance(step_tokens, dict):
-                    input_tok = step_tokens.get("input_tokens", 0)
-                    output_tok = step_tokens.get("output_tokens", 0)
-                else:
-                    input_tok = getattr(step_tokens, "input_tokens", 0)
-                    output_tok = getattr(step_tokens, "output_tokens", 0)
+                input_tok = (
+                    step_tokens.get("input_tokens", 0)
+                    if isinstance(step_tokens, dict)
+                    else getattr(step_tokens, "input_tokens", 0)
+                )
+                output_tok = (
+                    step_tokens.get("output_tokens", 0)
+                    if isinstance(step_tokens, dict)
+                    else getattr(step_tokens, "output_tokens", 0)
+                )
                 step_info["input_tokens"] = input_tok
                 step_info["output_tokens"] = output_tok
                 metrics["input_tokens"] += input_tok
                 metrics["output_tokens"] += output_tok
 
+            # Tool calls
             tool_calls = get_value(step, "tool_calls") or []
-            pending_tool_calls = []
+            pending_tool_calls: List[Dict[str, Any]] = []
             if tool_calls:
                 step_info["type"] = "tool_call"
                 for tc_idx, tc in enumerate(tool_calls):
@@ -355,18 +548,21 @@ class Agent:
                         step_info["tool_name"] = tc_info["name"]
                         step_info["tool_args"] = tc_info["arguments"]
                         step_info["tool_id"] = tc_info["id"]
-                    pending_tool_calls.append({
-                        "step": i + 1,
-                        "tool_name": tc_info["name"],
-                        "arguments": tc_info["arguments"],
-                        "id": tc_info["id"],
-                    })
+                    pending_tool_calls.append(
+                        {
+                            "step": i + 1,
+                            "tool_name": tc_info["name"],
+                            "arguments": tc_info["arguments"],
+                            "id": tc_info["id"],
+                        }
+                    )
                 if len(pending_tool_calls) > 1:
                     step_info["step_tool_calls"] = [
                         {"tool_name": p["tool_name"], "tool_args": p["arguments"]}
                         for p in pending_tool_calls
                     ]
 
+            # Observations / results
             observations = get_value(step, "observations")
             if observations:
                 step_info["tool_result"] = str(observations)
@@ -380,9 +576,9 @@ class Agent:
                 entry["action_output"] = step_info.get("action_output")
                 metrics["tool_calls"].append(entry)
 
+            # Reasoning / thinking
             model_output = get_value(step, "model_output")
             model_output_message = get_value(step, "model_output_message")
-
             if model_output:
                 model_output_str = str(model_output)
                 if not step_info["type"]:
@@ -392,14 +588,18 @@ class Agent:
             elif model_output_message and not step_info["thinking"]:
                 step_info["thinking"] = extract_thinking(None, model_output_message)
 
+            # Errors
             error = get_value(step, "error")
             if error:
                 step_info["type"] = "error"
                 step_info["error"] = str(error)
 
+            # Full model input context
             model_input_messages = get_value(step, "model_input_messages") or []
             if model_input_messages:
-                step_info["model_input_raw"] = [serialize_message(m) for m in model_input_messages]
+                step_info["model_input_raw"] = [
+                    serialize_message(m) for m in model_input_messages
+                ]
                 step_info["model_input_parsed"] = parse_input_messages(model_input_messages)
 
             metrics["steps"].append(step_info)
@@ -407,28 +607,46 @@ class Agent:
         metrics["total_tokens"] = metrics["input_tokens"] + metrics["output_tokens"]
         return metrics
 
+    # ── Run ──────────────────────────────────────────────────────────────────
+
     def run(self, task: str) -> Dict[str, Any]:
-        """Run a task and return ``{"answer", "metrics", "error"}``."""
+        """Run *task* and return ``{"answer", "metrics", "error"}``.
+
+        On success ``error`` is ``None`` and ``answer`` holds the agent's
+        final answer string.  On failure ``answer`` is ``None`` and
+        ``error`` holds the exception message; partial metrics are still
+        returned if any steps completed before the error.
+        """
         try:
             result = self.agent.run(task, return_full_result=True)
-        except Exception as e:
-            import traceback
-            err_msg = str(e)
-            print(f"\n[Agent.run] Run failed: {err_msg}")
-            print(traceback.format_exc())
-            partial_steps = []
+        except Exception as exc:
+            import traceback as _tb
+
+            err_msg = str(exc)
+            logger.error(
+                "Agent run failed: %s\n%s", err_msg, _tb.format_exc()
+            )
+            partial_steps: List[Any] = []
             try:
                 partial_steps = list(getattr(self.agent.memory, "steps", []))
             except Exception:
                 pass
+
             if partial_steps:
                 partial_metrics = self._extract_metrics_from_steps(partial_steps)
-                partial_metrics["total_tokens"] = partial_metrics["input_tokens"] + partial_metrics["output_tokens"]
+                partial_metrics["total_tokens"] = (
+                    partial_metrics["input_tokens"] + partial_metrics["output_tokens"]
+                )
                 return {"answer": None, "metrics": partial_metrics, "error": err_msg}
-            empty_metrics = {
-                "steps": [], "tool_calls": [],
-                "input_tokens": 0, "output_tokens": 0,
-                "total_tokens": 0, "num_steps": 0, "duration": 0.0,
+
+            empty_metrics: Dict[str, Any] = {
+                "steps": [],
+                "tool_calls": [],
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "num_steps": 0,
+                "num_tool_calls": 0,
             }
             return {"answer": None, "metrics": empty_metrics, "error": err_msg}
 
@@ -436,122 +654,172 @@ class Agent:
         steps = getattr(result, "steps", [])
         metrics = self._extract_metrics_from_steps(steps)
 
+        # Sanity-check token counts against the RunResult aggregate
         token_usage = getattr(result, "token_usage", None)
         if token_usage is not None:
-            ru_input = getattr(token_usage, "input_tokens", None) if not isinstance(token_usage, dict) else token_usage.get("input_tokens")
-            ru_output = getattr(token_usage, "output_tokens", None) if not isinstance(token_usage, dict) else token_usage.get("output_tokens")
+            ru_input = (
+                getattr(token_usage, "input_tokens", None)
+                if not isinstance(token_usage, dict)
+                else token_usage.get("input_tokens")
+            )
+            ru_output = (
+                getattr(token_usage, "output_tokens", None)
+                if not isinstance(token_usage, dict)
+                else token_usage.get("output_tokens")
+            )
             if ru_input is not None and ru_input != metrics["input_tokens"]:
-                print(f"[token warning] RunResult.input_tokens={ru_input} vs per-step sum={metrics['input_tokens']}")
+                logger.warning(
+                    "Token count mismatch: RunResult.input_tokens=%d, "
+                    "per-step sum=%d.",
+                    ru_input,
+                    metrics["input_tokens"],
+                )
             if ru_output is not None and ru_output != metrics["output_tokens"]:
-                print(f"[token warning] RunResult.output_tokens={ru_output} vs per-step sum={metrics['output_tokens']}")
+                logger.warning(
+                    "Token count mismatch: RunResult.output_tokens=%d, "
+                    "per-step sum=%d.",
+                    ru_output,
+                    metrics["output_tokens"],
+                )
 
         metrics["total_tokens"] = metrics["input_tokens"] + metrics["output_tokens"]
         return {"answer": answer, "metrics": metrics, "error": None}
 
-    def __del__(self):
-        if hasattr(self, "_mcp_client") and self._mcp_client:
-            try:
-                self._mcp_client.__exit__(None, None, None)
-            except Exception:
-                pass
+    # ── Cleanup ──────────────────────────────────────────────────────────────
 
+    def __del__(self) -> None:
+        _disconnect_mcp_clients(getattr(self, "_mcp_clients", []))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MCP-enabled agent
+# ─────────────────────────────────────────────────────────────────────────────
 
 class AgentWithAdditionalTools(Agent):
-    """An :class:`Agent` that accepts additional custom :class:`Tool` instances.
+    """Agent with multi-server MCP connectivity and optional local tools.
+
+    Connects to one or more MCP servers and merges their tools with any
+    directly-provided :class:`Tool` instances.  MCP tools appear first in
+    the tool list; local tools are appended after.
 
     Args:
-        mcp_server_url: MCP server URL.
-        additional_tools: Extra tool instances added to the agent.
-        model, api_key, provider, max_steps: Forwarded to :class:`Agent`.
-        model_seed: Optional reproducibility seed.
-        model_instance: Pre-created model (overrides model/api_key/provider/seed).
+        tools:          Local :class:`Tool` instances appended after MCP tools.
+        mcp_servers:    ``{name: server_config_dict}`` mapping.  Each entry is
+                        opened as an independent :class:`MCPClient`; a failure
+                        in one server is logged and the rest continue loading.
+                        Server config dicts are passed directly to
+                        :class:`MCPClient` — see module docstring for examples.
+        model:          Model name / ID.  See :func:`_create_model`.
+        api_key:        API key for the model provider.
+        provider:       HF Inference provider name.
+        max_steps:      Maximum agent steps before forced termination.
+        model_seed:     Optional seed for reproducible sampling.
+        model_instance: Pre-constructed model object.  Overrides *model*,
+                        *api_key*, *provider*, and *model_seed* when supplied.
     """
 
     def __init__(
         self,
-        mcp_server_url: str,
-        additional_tools: List[Tool],
+        tools: Optional[List[Tool]] = None,
+        mcp_servers: Optional[Dict[str, MCPServerConfig]] = None,
         model: Optional[str] = None,
         api_key: Optional[str] = None,
         provider: Optional[str] = None,
         max_steps: int = 10,
         model_seed: Optional[int] = None,
-        model_instance=None,
-    ):
-        if model_instance is not None:
-            self._model = model_instance
-        else:
-            self._model = _create_model(model, api_key, provider, model_seed=model_seed)
+        model_instance: Optional[Any] = None,
+    ) -> None:
+        mcp_clients, mcp_tools = _connect_mcp_servers(mcp_servers or {})
+        # MCP tools first so local overrides can shadow names if desired.
+        all_tools: List[Tool] = mcp_tools + list(tools or [])
 
-        mcp_server_url = mcp_server_url or os.environ.get("MCP_SERVER_URL")
-        self._mcp_client = None
-        tools = []
+        super().__init__(
+            tools=all_tools,
+            model=model,
+            api_key=api_key,
+            provider=provider,
+            max_steps=max_steps,
+            model_seed=model_seed,
+            model_instance=model_instance,
+        )
+        # Override the empty list set in Agent.__init__.
+        self._mcp_clients = mcp_clients
 
-        if mcp_server_url:
-            try:
-                self._mcp_client = MCPClient(
-                    {"url": mcp_server_url, "transport": "streamable-http"},
-                    structured_output=False,
-                )
-                tools = self._mcp_client.__enter__()
-            except Exception as e:
-                print(f"Warning: Failed to initialize MCP client: {e}")
-                self._mcp_client = None
 
-        if additional_tools:
-            tools.extend(additional_tools)
-
-        self.agent = ToolCallingAgent(tools=tools, model=self._model, max_steps=max_steps)
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Sub-agent orchestrator
+# ─────────────────────────────────────────────────────────────────────────────
 
 class AgentWithSubAgents(Agent):
-    """An agent that spawns sub-agents per requirement and aggregates results.
+    """Agent that spawns one :class:`AgentWithAdditionalTools` per requirement.
+
+    The coordinator itself is a plain :class:`Agent` (coordinator tasks rarely
+    need tools).  Each spawned sub-agent receives a fresh MCP connection pool
+    and the configured local tools.
 
     Args:
-        mcp_server_url: MCP server URL.
-        additional_tools: Extra tools for all sub-agents.
-        model, api_key, provider: Model configuration.
-        max_steps: Coordinator max steps.
-        sub_agent_max_steps: Sub-agent max steps.
+        tools:               Local tools forwarded to every sub-agent.
+        mcp_servers:         MCP server config dict forwarded to every sub-agent.
+        model:               Model name / ID used by both coordinator and
+                             sub-agents.
+        api_key:             API key.
+        provider:            HF Inference provider name.
+        max_steps:           Coordinator max steps.
+        sub_agent_max_steps: Max steps for each spawned sub-agent.
+        model_seed:          Optional seed.
+        model_instance:      Pre-constructed model shared by all agents.
     """
 
     def __init__(
         self,
-        mcp_server_url: str,
-        additional_tools: List[Tool] = None,
+        tools: Optional[List[Tool]] = None,
+        mcp_servers: Optional[Dict[str, MCPServerConfig]] = None,
         model: Optional[str] = None,
         api_key: Optional[str] = None,
         provider: Optional[str] = None,
         max_steps: int = 10,
         sub_agent_max_steps: int = 15,
-    ):
-        self.mcp_server_url = mcp_server_url
-        self.additional_tools = additional_tools or []
-        self.model = model
-        self.api_key = api_key
-        self.provider = provider
-        self.sub_agent_max_steps = sub_agent_max_steps
+        model_seed: Optional[int] = None,
+        model_instance: Optional[Any] = None,
+    ) -> None:
+        # Store sub-agent config before super().__init__ to make the object
+        # consistent if _create_sub_agent is ever called early.
+        self._sub_tools: List[Tool] = list(tools or [])
+        self._sub_mcp_servers: Dict[str, MCPServerConfig] = dict(mcp_servers or {})
+        self._sub_agent_max_steps = sub_agent_max_steps
+        self._model_cfg = {
+            "model": model,
+            "api_key": api_key,
+            "provider": provider,
+            "model_seed": model_seed,
+            "model_instance": model_instance,
+        }
 
+        # Coordinator has no tools — it only dispatches to sub-agents.
         super().__init__(
-            mcp_server_url=mcp_server_url,
+            tools=[],
             model=model,
             api_key=api_key,
             provider=provider,
             max_steps=max_steps,
+            model_seed=model_seed,
+            model_instance=model_instance,
         )
 
     def _create_sub_agent(self) -> AgentWithAdditionalTools:
+        """Spawn a fresh sub-agent with its own MCP connections."""
         return AgentWithAdditionalTools(
-            mcp_server_url=self.mcp_server_url,
-            additional_tools=self.additional_tools,
-            model=self.model,
-            api_key=self.api_key,
-            provider=self.provider,
-            max_steps=self.sub_agent_max_steps,
+            tools=list(self._sub_tools),
+            mcp_servers=dict(self._sub_mcp_servers),
+            max_steps=self._sub_agent_max_steps,
+            **self._model_cfg,
         )
 
-    def _aggregate_metrics(self, sub_results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        aggregated = {
+    def _aggregate_metrics(
+        self, sub_results: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Aggregate metrics from all sub-agent results into a single dict."""
+        aggregated: Dict[str, Any] = {
             "total_requirements": len(sub_results),
             "total_input_tokens": 0,
             "total_output_tokens": 0,
@@ -563,34 +831,41 @@ class AgentWithSubAgents(Agent):
         }
 
         for i, result in enumerate(sub_results):
-            metrics = result.get("metrics", {})
-            aggregated["total_input_tokens"] += metrics.get("input_tokens", 0)
-            aggregated["total_output_tokens"] += metrics.get("output_tokens", 0)
-            aggregated["total_tokens"] += metrics.get("total_tokens", 0)
-            aggregated["total_steps"] += metrics.get("num_steps", 0)
-            aggregated["total_tool_calls"] += metrics.get("num_tool_calls", 0)
-            aggregated["per_requirement_metrics"].append({
-                "requirement_index": i,
-                "requirement_id": result.get("requirement_id"),
-                "input_tokens": metrics.get("input_tokens", 0),
-                "output_tokens": metrics.get("output_tokens", 0),
-                "total_tokens": metrics.get("total_tokens", 0),
-                "num_steps": metrics.get("num_steps", 0),
-                "num_tool_calls": metrics.get("num_tool_calls", 0),
-                "steps": metrics.get("steps", []),
-                "tool_calls": metrics.get("tool_calls", []),
-            })
-            for tool_call in metrics.get("tool_calls", []):
-                aggregated["all_tool_calls"].append({
-                    "requirement_id": result.get("requirement_id"),
+            m = result.get("metrics", {})
+            aggregated["total_input_tokens"] += m.get("input_tokens", 0)
+            aggregated["total_output_tokens"] += m.get("output_tokens", 0)
+            aggregated["total_tokens"] += m.get("total_tokens", 0)
+            aggregated["total_steps"] += m.get("num_steps", 0)
+            aggregated["total_tool_calls"] += m.get("num_tool_calls", 0)
+            aggregated["per_requirement_metrics"].append(
+                {
                     "requirement_index": i,
-                    **tool_call,
-                })
+                    "requirement_id": result.get("requirement_id"),
+                    "input_tokens": m.get("input_tokens", 0),
+                    "output_tokens": m.get("output_tokens", 0),
+                    "total_tokens": m.get("total_tokens", 0),
+                    "num_steps": m.get("num_steps", 0),
+                    "num_tool_calls": m.get("num_tool_calls", 0),
+                    "steps": m.get("steps", []),
+                    "tool_calls": m.get("tool_calls", []),
+                }
+            )
+            for tc in m.get("tool_calls", []):
+                aggregated["all_tool_calls"].append(
+                    {
+                        "requirement_id": result.get("requirement_id"),
+                        "requirement_index": i,
+                        **tc,
+                    }
+                )
 
-        if len(sub_results) > 0:
-            aggregated["avg_tokens_per_requirement"] = aggregated["total_tokens"] / len(sub_results)
-            aggregated["avg_steps_per_requirement"] = aggregated["total_steps"] / len(sub_results)
-            aggregated["avg_tool_calls_per_requirement"] = aggregated["total_tool_calls"] / len(sub_results)
+        n = len(sub_results)
+        if n:
+            aggregated["avg_tokens_per_requirement"] = aggregated["total_tokens"] / n
+            aggregated["avg_steps_per_requirement"] = aggregated["total_steps"] / n
+            aggregated["avg_tool_calls_per_requirement"] = (
+                aggregated["total_tool_calls"] / n
+            )
 
         return aggregated
 
@@ -603,19 +878,25 @@ class AgentWithSubAgents(Agent):
         """Run a separate sub-agent for each requirement and aggregate results.
 
         Args:
-            requirements: ``{requirement_id: description}`` mapping.
-            tasks: ``{requirement_id: [task_strings]}`` mapping.
-            base_prompt_template: Template with ``{requirement_id}``,
-                ``{requirement_description}``, ``{tasks}`` placeholders.
+            requirements:          ``{requirement_id: description}`` mapping.
+            tasks:                 ``{requirement_id: [task_strings]}`` mapping.
+            base_prompt_template:  Template string with ``{requirement_id}``,
+                                   ``{requirement_description}``, and ``{tasks}``
+                                   placeholders.
 
         Returns:
-            ``{"answer", "sub_results", "metrics"}``
+            ``{"answer", "sub_results", "metrics"}`` — see ``docs/reference.md``
+            for the full schema.
         """
-        sub_results = []
+        sub_results: List[Dict[str, Any]] = []
 
         for req_id, req_description in requirements.items():
             req_tasks = tasks.get(req_id, [])
-            task_list = "\n".join(f"    - {task}" for task in req_tasks) if req_tasks else "    (No specific tasks)"
+            task_list = (
+                "\n".join(f"    - {t}" for t in req_tasks)
+                if req_tasks
+                else "    (No specific tasks)"
+            )
             prompt = base_prompt_template.format(
                 requirement_id=req_id,
                 requirement_description=req_description,
@@ -628,44 +909,58 @@ class AgentWithSubAgents(Agent):
             result["tasks"] = req_tasks
             sub_results.append(result)
 
-        aggregated_metrics = self._aggregate_metrics(sub_results)
         return {
             "answer": f"Completed {len(sub_results)} sub-agent evaluations.",
             "sub_results": sub_results,
-            "metrics": aggregated_metrics,
+            "metrics": self._aggregate_metrics(sub_results),
         }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Constrained agent
+# ─────────────────────────────────────────────────────────────────────────────
+
 class AgentWithConstraints(Agent):
-    """An :class:`Agent` with pre-execution FOLTL constraint enforcement.
+    """Agent with pre-execution FOLTL constraint enforcement.
 
-    Uses :class:`ToolCallingAgentWithConstraints` under the hood, providing
-    both rich metric extraction and HARD_STOP / TOLERATE constraint checking.
+    Uses :class:`ToolCallingAgentWithConstraints` under the hood.  Accepts
+    the same tool / MCP parameters as :class:`AgentWithAdditionalTools` plus
+    constraint configuration.
 
-    The returned metrics dict is augmented with:
+    The ``metrics`` dict returned by :meth:`run` is augmented with five
+    additional keys (see ``docs/reference.md``):
 
     * ``run_status``             – ``"completed"`` or ``"stopped"``
     * ``stopped_by_constraint``  – name of the HARD_STOP constraint (or ``None``)
     * ``constraint_violations``  – list of violation records
     * ``constraint_checks``      – total pre-execution evaluations performed
-    * ``completed_trace``        – list of executed tool call dicts
+    * ``completed_trace``        – tool calls that successfully executed
 
     Args:
-        mcp_server_url: MCP server URL.
-        additional_tools: Extra tool instances.
-        constraints: FOLTL constraints to enforce.
-        constraint_severities: ``{name: ConstraintSeverity}`` mapping.
-        default_severity: Fallback severity for unmapped constraints.
-        model, api_key, provider, max_steps: Model/agent config.
-        model_seed: Optional reproducibility seed.
-        model_instance: Pre-created model instance.
+        tools:                Local :class:`Tool` instances appended after
+                              MCP tools.
+        mcp_servers:          ``{name: server_config_dict}`` mapping passed to
+                              :func:`_connect_mcp_servers`.
+        constraints:          FOLTL constraints to enforce at every step.
+                              Can be overridden per-call via :meth:`run`.
+        constraint_severities: ``{constraint_name: ConstraintSeverity}`` mapping.
+                              Constraints not listed here fall back to
+                              *default_severity*.
+        default_severity:     Fallback severity for unmapped constraints
+                              (default: ``HARD_STOP``).
+        model:                Model name / ID.
+        api_key:              API key for the model provider.
+        provider:             HF Inference provider name.
+        max_steps:            Maximum agent steps before forced termination.
+        model_seed:           Optional seed for reproducible sampling.
+        model_instance:       Pre-constructed model object.
     """
 
     def __init__(
         self,
-        mcp_server_url: str,
-        additional_tools: Optional[List[Tool]] = None,
-        constraints: Optional[List] = None,
+        tools: Optional[List[Tool]] = None,
+        mcp_servers: Optional[Dict[str, MCPServerConfig]] = None,
+        constraints: Optional[List[Any]] = None,
         constraint_severities: Optional[Dict[str, ConstraintSeverity]] = None,
         default_severity: ConstraintSeverity = ConstraintSeverity.HARD_STOP,
         model: Optional[str] = None,
@@ -673,38 +968,30 @@ class AgentWithConstraints(Agent):
         provider: Optional[str] = None,
         max_steps: int = 10,
         model_seed: Optional[int] = None,
-        model_instance=None,
-    ):
-        if model_instance is not None:
-            self._model = model_instance
-        else:
-            self._model = _create_model(model, api_key, provider, model_seed=model_seed)
+        model_instance: Optional[Any] = None,
+    ) -> None:
+        mcp_clients, mcp_tools = _connect_mcp_servers(mcp_servers or {})
+        all_tools: List[Tool] = mcp_tools + list(tools or [])
 
-        mcp_server_url = mcp_server_url or os.environ.get("MCP_SERVER_URL")
-        self._mcp_client = None
-        tools = []
+        model_obj = (
+            model_instance
+            if model_instance is not None
+            else _create_model(model, api_key, provider, model_seed)
+        )
 
-        if mcp_server_url:
-            try:
-                self._mcp_client = MCPClient(
-                    {"url": mcp_server_url, "transport": "streamable-http"},
-                    structured_output=False,
-                )
-                tools = self._mcp_client.__enter__()
-            except Exception as e:
-                print(f"Warning: Failed to initialize MCP client: {e}")
-                self._mcp_client = None
-
-        if additional_tools:
-            tools.extend(additional_tools)
-
-        self._init_constraints = constraints or []
-        self._init_severities = constraint_severities or {}
+        self._init_constraints: List[Any] = constraints or []
+        self._init_severities: Dict[str, ConstraintSeverity] = constraint_severities or {}
         self._default_severity = default_severity
 
+        # Bypass Agent.__init__: we need ToolCallingAgentWithConstraints,
+        # not ToolCallingAgent, but we still set the same three attributes
+        # so that inherited methods (run, _extract_metrics_from_steps,
+        # __del__) work identically.
+        self._model = model_obj
+        self._mcp_clients = mcp_clients
         self.agent = ToolCallingAgentWithConstraints(
-            tools=tools,
-            model=self._model,
+            tools=all_tools,
+            model=model_obj,
             constraints=self._init_constraints,
             constraint_severities=self._init_severities,
             default_severity=self._default_severity,
@@ -714,10 +1001,22 @@ class AgentWithConstraints(Agent):
     def run(
         self,
         task: str,
-        constraints: Optional[List] = None,
+        constraints: Optional[List[Any]] = None,
         constraint_severities: Optional[Dict[str, ConstraintSeverity]] = None,
     ) -> Dict[str, Any]:
-        """Run with constraint checking; returns augmented metrics dict."""
+        """Run with pre-execution constraint checking.
+
+        Args:
+            task:                  The task string for the agent.
+            constraints:           Per-run constraint override.  When supplied
+                                   these replace the instance-level constraints
+                                   for this call only.
+            constraint_severities: Per-run severity override.
+
+        Returns:
+            ``{"answer", "metrics", "error"}`` with constraint fields merged
+            into ``metrics``.  See ``docs/reference.md`` for the full schema.
+        """
         run_kwargs: Dict[str, Any] = {}
         if constraints is not None:
             run_kwargs["constraints"] = constraints
@@ -726,13 +1025,16 @@ class AgentWithConstraints(Agent):
 
         try:
             result = self.agent.run(task, return_full_result=True, **run_kwargs)
-        except Exception as e:
-            import traceback
-            err_msg = str(e)
-            print(f"\n[AgentWithConstraints.run] Run failed: {err_msg}")
-            print(traceback.format_exc())
+        except Exception as exc:
+            import traceback as _tb
 
-            partial_steps = []
+            err_msg = str(exc)
+            logger.error(
+                "AgentWithConstraints run failed: %s\n%s",
+                err_msg,
+                _tb.format_exc(),
+            )
+            partial_steps: List[Any] = []
             try:
                 partial_steps = list(getattr(self.agent.memory, "steps", []))
             except Exception:
@@ -742,20 +1044,21 @@ class AgentWithConstraints(Agent):
 
             if partial_steps:
                 partial_metrics = self._extract_metrics_from_steps(partial_steps)
-                partial_metrics["total_tokens"] = partial_metrics["input_tokens"] + partial_metrics["output_tokens"]
+                partial_metrics["total_tokens"] = (
+                    partial_metrics["input_tokens"] + partial_metrics["output_tokens"]
+                )
             else:
                 partial_metrics = {
-                    "steps": [], "tool_calls": [],
-                    "input_tokens": 0, "output_tokens": 0,
-                    "total_tokens": 0, "num_steps": 0, "duration": 0.0,
+                    "steps": [],
+                    "tool_calls": [],
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                    "num_steps": 0,
+                    "num_tool_calls": 0,
                 }
 
-            partial_metrics["run_status"] = constraint_status["status"]
-            partial_metrics["stopped_by_constraint"] = constraint_status["stopped_by"]
-            partial_metrics["constraint_violations"] = constraint_status["violations"]
-            partial_metrics["constraint_checks"] = constraint_status["constraint_checks"]
-            partial_metrics["completed_trace"] = constraint_status["completed_trace"]
-
+            self._merge_constraint_status(partial_metrics, constraint_status)
             return {"answer": None, "metrics": partial_metrics, "error": err_msg}
 
         answer = result.output if hasattr(result, "output") else result
@@ -775,17 +1078,31 @@ class AgentWithConstraints(Agent):
                 else token_usage.get("output_tokens")
             )
             if ru_input is not None and ru_input != metrics["input_tokens"]:
-                print(f"[token warning] RunResult.input_tokens={ru_input} vs per-step sum={metrics['input_tokens']}")
+                logger.warning(
+                    "Token count mismatch: RunResult.input_tokens=%d, "
+                    "per-step sum=%d.",
+                    ru_input,
+                    metrics["input_tokens"],
+                )
             if ru_output is not None and ru_output != metrics["output_tokens"]:
-                print(f"[token warning] RunResult.output_tokens={ru_output} vs per-step sum={metrics['output_tokens']}")
+                logger.warning(
+                    "Token count mismatch: RunResult.output_tokens=%d, "
+                    "per-step sum=%d.",
+                    ru_output,
+                    metrics["output_tokens"],
+                )
 
         metrics["total_tokens"] = metrics["input_tokens"] + metrics["output_tokens"]
-
-        constraint_status = self.agent.get_constraint_status()
-        metrics["run_status"] = constraint_status["status"]
-        metrics["stopped_by_constraint"] = constraint_status["stopped_by"]
-        metrics["constraint_violations"] = constraint_status["violations"]
-        metrics["constraint_checks"] = constraint_status["constraint_checks"]
-        metrics["completed_trace"] = constraint_status["completed_trace"]
-
+        self._merge_constraint_status(metrics, self.agent.get_constraint_status())
         return {"answer": answer, "metrics": metrics, "error": None}
+
+    @staticmethod
+    def _merge_constraint_status(
+        metrics: Dict[str, Any], status: Dict[str, Any]
+    ) -> None:
+        """Merge ``get_constraint_status()`` fields into a metrics dict in-place."""
+        metrics["run_status"] = status["status"]
+        metrics["stopped_by_constraint"] = status["stopped_by"]
+        metrics["constraint_violations"] = status["violations"]
+        metrics["constraint_checks"] = status["constraint_checks"]
+        metrics["completed_trace"] = status["completed_trace"]

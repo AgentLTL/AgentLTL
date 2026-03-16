@@ -77,8 +77,7 @@ constraints = [
 ]
 
 agent = AgentWithConstraints(
-    mcp_server_url=None,
-    additional_tools=[FetchTool(), ProcessTool()],
+    tools=[FetchTool(), ProcessTool()],
     constraints=constraints,
     constraint_severities={"fetch_before_process": ConstraintSeverity.HARD_STOP},
 )
@@ -170,13 +169,50 @@ The higher-level wrapper adds MCP connectivity and metrics extraction:
 ```python
 from agentltl.integrations.smolagents import AgentWithConstraints
 
+# Local tools only
 agent = AgentWithConstraints(
-    mcp_server_url="http://localhost:4000/mcp",
-    additional_tools=my_tools,
+    tools=my_tools,
     constraints=my_constraints,
 )
+
+# With MCP servers
+agent = AgentWithConstraints(
+    tools=my_tools,
+    mcp_servers={
+        "filesystem": {
+            "url": "http://localhost:4000/mcp",
+            "transport": "streamable-http",
+        },
+    },
+    constraints=my_constraints,
+)
+
 result = agent.run("do the task")
 # result["metrics"]["run_status"]  → "completed" | "stopped"
+```
+
+### AgentWithAdditionalTools
+
+General-purpose agent with multi-server MCP support:
+
+```python
+from agentltl.integrations.smolagents import AgentWithAdditionalTools
+
+agent = AgentWithAdditionalTools(
+    tools=my_local_tools,
+    mcp_servers={
+        "filesystem": {
+            "url": "http://localhost:4000/mcp",
+            "transport": "streamable-http",
+        },
+        "knowledge_graph": {
+            "url": "http://localhost:4001/mcp",
+            "transport": "streamable-http",
+            "headers": {"Authorization": "Bearer <token>"},
+        },
+    },
+)
+result = agent.run("do the task")
 ```
 
 ---

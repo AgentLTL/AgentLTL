@@ -1,8 +1,34 @@
 """
 05_fan_out_fan_in_agent.py – Fan-out / fan-in pattern with AllBefore.
 
-Enforces that several parallel preparation steps all complete before a
-merge/aggregation step is called.  Uses AllBefore to model the gate.
+Enforces that three parallel data-fetch steps all complete before the
+merge/aggregation step (generate_recommendations) is called.
+
+Compliance is verified post-hoc.  To enforce it at runtime, swap to
+``AgentWithConstraints``::
+
+    from agentltl.integrations.smolagents import AgentWithConstraints, ConstraintSeverity
+
+    agent = AgentWithConstraints(
+        tools=tools,
+        constraints=CONSTRAINTS,
+        constraint_severities={"all_fetches_before_recommend": ConstraintSeverity.HARD_STOP},
+        model=os.environ.get("MODEL"),
+    )
+
+To connect to an MCP server that exposes the data-fetch tools instead of
+running them locally::
+
+    agent = AgentWithAdditionalTools(
+        mcp_servers={
+            "data_api": {
+                "url": "http://localhost:4000/mcp",
+                "transport": "streamable-http",
+                "headers": {"Authorization": "Bearer <token>"},
+            },
+        },
+        model=os.environ.get("MODEL"),
+    )
 
 Requirements:
     pip install agentltl[smolagents]
@@ -18,11 +44,11 @@ from agentltl import Constraint, AllBefore, verify_trace
 from agentltl.integrations.smolagents import AgentWithAdditionalTools
 
 
-# ── Tools ────────────────────────────────────────────────────────────────────
+# ── Tools ─────────────────────────────────────────────────────────────────────
 
 class FetchUserDataTool(Tool):
     name = "fetch_user_data"
-    description = "Fetch user profile data (parallel step 1 of 3)."
+    description = "Fetch user profile data (fan-out step 1 of 3)."
     inputs = {}
     output_type = "string"
 
@@ -32,7 +58,7 @@ class FetchUserDataTool(Tool):
 
 class FetchOrderDataTool(Tool):
     name = "fetch_order_data"
-    description = "Fetch user order history (parallel step 2 of 3)."
+    description = "Fetch user order history (fan-out step 2 of 3)."
     inputs = {}
     output_type = "string"
 
@@ -42,7 +68,7 @@ class FetchOrderDataTool(Tool):
 
 class FetchInventoryDataTool(Tool):
     name = "fetch_inventory_data"
-    description = "Fetch current inventory data (parallel step 3 of 3)."
+    description = "Fetch current inventory data (fan-out step 3 of 3)."
     inputs = {}
     output_type = "string"
 
@@ -54,7 +80,8 @@ class GenerateRecommendationsTool(Tool):
     name = "generate_recommendations"
     description = (
         "Generate product recommendations. "
-        "MUST only be called AFTER fetch_user_data, fetch_order_data, AND fetch_inventory_data."
+        "Must only be called AFTER fetch_user_data, fetch_order_data, "
+        "AND fetch_inventory_data have all completed (fan-in step)."
     )
     inputs = {}
     output_type = "string"
@@ -63,7 +90,7 @@ class GenerateRecommendationsTool(Tool):
         return "Recommendations: [item_A (in stock), item_C (low stock)]"
 
 
-# ── Constraints ──────────────────────────────────────────────────────────────
+# ── Constraints ───────────────────────────────────────────────────────────────
 
 CONSTRAINTS = [
     Constraint(
@@ -73,10 +100,12 @@ CONSTRAINTS = [
             "generate_recommendations",
         ),
         weight=3.0,
-        description="All three data fetches must complete before recommendations",
+        description="All three data fetches must complete before generating recommendations",
     ),
 ]
 
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     tools = [
@@ -87,15 +116,14 @@ def main():
     ]
 
     agent = AgentWithAdditionalTools(
-        mcp_server_url=None,
-        additional_tools=tools,
+        tools=tools,
         model=os.environ.get("MODEL", "Qwen/Qwen3-Next-80B-A3B-Instruct"),
         max_steps=8,
     )
 
     task = (
-        "Fetch user data, order data, and inventory data (you can do these in any order). "
-        "Then generate product recommendations based on all three data sources. "
+        "Fetch user data, order data, and inventory data (in any order). "
+        "Then generate product recommendations based on all three. "
         "Return the recommendations."
     )
 
@@ -107,27 +135,29 @@ def main():
 
     tool_seq = [tc["tool_name"] for tc in result["metrics"].get("tool_calls", [])]
     print(f"Tool sequence: {tool_seq}")
+    print(f"Steps: {result['metrics']['num_steps']}")
 
-    # Post-hoc verification
     print("\n--- Post-hoc constraint verification ---")
     verification = verify_trace(result["metrics"], CONSTRAINTS)
-    print(f"Compliance: {verification['compliance_label']} ({verification['compliance_score']:.2f})")
+    print(
+        f"Compliance: {verification['compliance_label']} "
+        f"({verification['compliance_score']:.2f})"
+    )
     for c in verification["constraints"]:
         status = "PASS" if c["passed"] else "FAIL"
-        print(f"  [{status}] {c['name']}: {c['detail']}")
+        print(f"  [{status}] {c['name']} (w={c['weight']}): {c['detail']}")
 
-    # Show what would happen with missing a fetch
-    print("\n--- Partial trace (missing fetch_inventory_data) ---")
-    partial_metrics = {
+    print("\n--- Partial trace failure case (missing fetch_inventory_data) ---")
+    bad_metrics = {
         "tool_calls": [
             {"tool_name": "fetch_user_data"},
             {"tool_name": "fetch_order_data"},
             {"tool_name": "generate_recommendations"},
         ]
     }
-    partial_result = verify_trace(partial_metrics, CONSTRAINTS)
-    print(f"Compliance: {partial_result['compliance_label']} ({partial_result['compliance_score']:.2f})")
-    print(f"Detail: {partial_result['constraints'][0]['detail']}")
+    bad = verify_trace(bad_metrics, CONSTRAINTS)
+    print(f"Compliance: {bad['compliance_label']} ({bad['compliance_score']:.2f})")
+    print(f"Detail: {bad['constraints'][0]['detail']}")
 
 
 if __name__ == "__main__":

@@ -2,8 +2,40 @@
 04_loop_termination_agent.py – While-loop compliance with CalledNTimes + Predicate.
 
 Verifies that a polling tool is called the correct number of times before
-the agent exits the loop.  Uses a Predicate constraint to check the
-last poll result before taking action.
+the agent exits the loop and that the last poll returned READY before
+process_result is called.
+
+The agent is built with ``AgentWithAdditionalTools`` (no runtime enforcement)
+so the compliance is measured post-hoc via ``verify_trace()``.  This pattern
+is appropriate when you want to audit behaviour without interrupting the run.
+
+To enable runtime enforcement instead, swap to ``AgentWithConstraints``::
+
+    from agentltl.integrations.smolagents import AgentWithConstraints, ConstraintSeverity
+
+    agent = AgentWithConstraints(
+        tools=[PollStatusTool(), ProcessResultTool()],
+        constraints=CONSTRAINTS,
+        constraint_severities={
+            "poll_at_least_3":    ConstraintSeverity.TOLERATE,
+            "process_after_ready": ConstraintSeverity.HARD_STOP,
+        },
+        model=os.environ.get("MODEL"),
+        max_steps=12,
+    )
+
+Adding MCP servers is the same for both classes::
+
+    agent = AgentWithAdditionalTools(
+        tools=local_tools,
+        mcp_servers={
+            "status_server": {
+                "url": "http://localhost:4000/mcp",
+                "transport": "streamable-http",
+            },
+        },
+        model=os.environ.get("MODEL"),
+    )
 
 Requirements:
     pip install agentltl[smolagents]
@@ -13,19 +45,19 @@ Run:
     python examples/04_loop_termination_agent.py
 """
 
-import os
 import json
+import os
 from smolagents import Tool
 from agentltl import Constraint, CalledNTimes, Predicate, Trace, verify_trace
 from agentltl.integrations.smolagents import AgentWithAdditionalTools
 
 
-# ── Stateful polling tool ────────────────────────────────────────────────────
+# ── Stateful polling tool ──────────────────────────────────────────────────────
 
 class PollStatusTool(Tool):
     name = "poll_status"
     description = (
-        "Poll the system status. Returns JSON with 'status' field. "
+        "Poll the system status. Returns JSON with a 'status' field. "
         "Status is 'PENDING' until the 3rd call, then 'READY'."
     )
     inputs = {}
@@ -52,11 +84,14 @@ class ProcessResultTool(Tool):
         return "Processing complete."
 
 
-# ── Predicate: last poll must show READY before process_result ───────────────
+# ── Predicate: last poll must show READY before process_result ─────────────────
 
 def last_poll_was_ready(trace: Trace, position: int, metrics=None) -> dict:
-    """True iff the last poll_status call before this position returned READY."""
-    poll_calls = [c for c in trace.calls if c.name == "poll_status" and c.position < position]
+    """True iff the most recent poll_status call before *position* returned READY."""
+    poll_calls = [
+        c for c in trace.calls
+        if c.name == "poll_status" and c.position < position
+    ]
     if not poll_calls:
         return {"passed": False, "note": "No poll_status call found before this position"}
     last_poll = poll_calls[-1]
@@ -67,11 +102,11 @@ def last_poll_was_ready(trace: Trace, position: int, metrics=None) -> dict:
     except (json.JSONDecodeError, ValueError):
         status = str(raw_result)
     if status == "READY":
-        return {"passed": True, "note": f"Last poll returned READY"}
-    return {"passed": False, "note": f"Last poll returned {status}, not READY"}
+        return {"passed": True, "note": "Last poll returned READY"}
+    return {"passed": False, "note": f"Last poll returned {status!r}, not READY"}
 
 
-# ── Constraints ──────────────────────────────────────────────────────────────
+# ── Constraints ───────────────────────────────────────────────────────────────
 
 CONSTRAINTS = [
     Constraint(
@@ -89,13 +124,11 @@ CONSTRAINTS = [
 ]
 
 
-def main():
-    poll_tool = PollStatusTool()
-    tools = [poll_tool, ProcessResultTool()]
+# ── Main ──────────────────────────────────────────────────────────────────────
 
+def main():
     agent = AgentWithAdditionalTools(
-        mcp_server_url=None,
-        additional_tools=tools,
+        tools=[PollStatusTool(), ProcessResultTool()],
         model=os.environ.get("MODEL", "Qwen/Qwen3-Next-80B-A3B-Instruct"),
         max_steps=12,
     )
@@ -114,14 +147,17 @@ def main():
 
     tool_seq = [tc["tool_name"] for tc in result["metrics"].get("tool_calls", [])]
     print(f"Tool sequence: {tool_seq}")
+    print(f"Steps: {result['metrics']['num_steps']}")
 
-    # Post-hoc verification
     print("\n--- Post-hoc constraint verification ---")
     verification = verify_trace(result["metrics"], CONSTRAINTS)
-    print(f"Compliance: {verification['compliance_label']} ({verification['compliance_score']:.2f})")
+    print(
+        f"Compliance: {verification['compliance_label']} "
+        f"({verification['compliance_score']:.2f})"
+    )
     for c in verification["constraints"]:
         status = "PASS" if c["passed"] else "FAIL"
-        print(f"  [{status}] {c['name']}: {c['detail']}")
+        print(f"  [{status}] {c['name']} (w={c['weight']}): {c['detail']}")
 
 
 if __name__ == "__main__":

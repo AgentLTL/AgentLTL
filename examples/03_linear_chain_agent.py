@@ -1,9 +1,29 @@
 """
 03_linear_chain_agent.py – Linear chain (A→B→C) with AgentWithConstraints.
 
-Enforces the ordering constraint fetch → clean → summarize using
-HARD_STOP severity.  If the agent tries to call a tool out of order
-the run is aborted immediately.
+Enforces the ordering constraint fetch → clean → summarize.
+
+* ``fetch_before_clean`` is HARD_STOP: the run aborts immediately if the agent
+  tries to call clean_readings before fetch_raw_readings.
+* ``clean_before_summarize`` is TOLERATE: a violation is logged but the run
+  continues, demonstrating how to mix enforcement modes.
+
+This example also shows how to add MCP connectivity — replace the ``tools``
+list with ``mcp_servers`` or combine both::
+
+    from agentltl.integrations.smolagents import AgentWithConstraints
+
+    agent = AgentWithConstraints(
+        tools=local_tools,
+        mcp_servers={
+            "my_server": {
+                "url": "http://localhost:4000/mcp",
+                "transport": "streamable-http",
+            },
+        },
+        constraints=CONSTRAINTS,
+        constraint_severities=SEVERITIES,
+    )
 
 Requirements:
     pip install agentltl[smolagents]
@@ -19,7 +39,7 @@ from agentltl import Constraint, Before
 from agentltl.integrations.smolagents import AgentWithConstraints, ConstraintSeverity
 
 
-# ── Dummy tools ──────────────────────────────────────────────────────────────
+# ── Tools ─────────────────────────────────────────────────────────────────────
 
 class FetchRawReadingsTool(Tool):
     name = "fetch_raw_readings"
@@ -51,13 +71,13 @@ class SummarizeReadingsTool(Tool):
         return "Summary: mean=23.82, min=22.8, max=25.0, std=0.82"
 
 
-# ── Constraints ──────────────────────────────────────────────────────────────
+# ── Constraints ───────────────────────────────────────────────────────────────
 
 CONSTRAINTS = [
     Constraint(
         name="fetch_before_clean",
         formula=Before("fetch_raw_readings", "clean_readings"),
-        weight=1.0,
+        weight=2.0,
         description="Raw readings must be fetched before cleaning",
     ),
     Constraint(
@@ -68,18 +88,19 @@ CONSTRAINTS = [
     ),
 ]
 
+# HARD_STOP aborts immediately; TOLERATE logs and continues.
+# Constraints not listed here fall back to default_severity (HARD_STOP).
 SEVERITIES = {
-    "fetch_before_clean": ConstraintSeverity.HARD_STOP,
-    "clean_before_summarize": ConstraintSeverity.HARD_STOP,
+    "fetch_before_clean":    ConstraintSeverity.HARD_STOP,
+    "clean_before_summarize": ConstraintSeverity.TOLERATE,
 }
 
 
-def main():
-    tools = [FetchRawReadingsTool(), CleanReadingsTool(), SummarizeReadingsTool()]
+# ── Main ──────────────────────────────────────────────────────────────────────
 
+def main():
     agent = AgentWithConstraints(
-        mcp_server_url=None,
-        additional_tools=tools,
+        tools=[FetchRawReadingsTool(), CleanReadingsTool(), SummarizeReadingsTool()],
         constraints=CONSTRAINTS,
         constraint_severities=SEVERITIES,
         model=os.environ.get("MODEL", "Qwen/Qwen3-Next-80B-A3B-Instruct"),
@@ -95,22 +116,26 @@ def main():
     print("Running constrained agent (linear chain A→B→C)...")
     result = agent.run(task)
 
-    print(f"\nAnswer: {result['answer']}")
-    print(f"Error:  {result['error']}")
+    print(f"\nAnswer:     {result['answer']}")
+    print(f"Error:      {result['error']}")
     print(f"Run status: {result['metrics'].get('run_status')}")
     print(f"Stopped by: {result['metrics'].get('stopped_by_constraint')}")
     print(f"Constraint checks: {result['metrics'].get('constraint_checks')}")
 
     violations = result["metrics"].get("constraint_violations", [])
     if violations:
-        print(f"Violations ({len(violations)}):")
+        print(f"\nViolations ({len(violations)}):")
         for v in violations:
-            print(f"  - {v['constraint_name']} at step {v['step_number']}: {v['detail']}")
+            print(
+                f"  [{v['severity']}] {v['constraint_name']} "
+                f"at step {v['step_number']}: {v['detail']}"
+            )
     else:
         print("No constraint violations.")
 
     tool_seq = [tc["tool_name"] for tc in result["metrics"].get("tool_calls", [])]
-    print(f"Tool sequence: {tool_seq}")
+    print(f"\nTool sequence: {tool_seq}")
+    print(f"Steps: {result['metrics']['num_steps']}")
 
 
 if __name__ == "__main__":
