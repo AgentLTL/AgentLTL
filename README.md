@@ -232,6 +232,21 @@ python examples/03_linear_chain_agent.py     # requires HF_TOKEN
 
 ---
 
+## Return Value Reference
+
+See [docs/reference.md](docs/reference.md) for the complete annotated
+structure of every dict returned by the public API:
+
+- `Agent.run()` → `{"answer", "metrics", "error"}`
+- `metrics` dict — top-level keys, `tool_calls` list, `steps` list,
+  `model_input_parsed`
+- `AgentWithConstraints.run()` — constraint fields added to metrics
+- `ToolCallingAgentWithConstraints.get_constraint_status()`
+- `verify_trace()` — compliance result and per-constraint records
+- `AgentWithSubAgents.run_per_requirement()` — aggregated metrics
+
+---
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
