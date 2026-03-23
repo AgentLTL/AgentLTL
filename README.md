@@ -2,7 +2,7 @@
 
 **FOLTL constraint verification for LLM agent traces.**
 
-AgentLTL provides a First-Order Linear Temporal Logic (FOLTL) engine for verifying that LLM agent tool-call traces comply with procedural constraints.  It supports both **post-hoc verification** (after a run completes) and **runtime enforcement** (pre-execution checking before each tool call).
+AgentLTL provides a First-Order Linear Temporal Logic (FOLTL) engine for verifying that LLM agent tool-call traces comply with procedural constraints.  It supports both **post-hoc verification** (after a run completes) and **runtime enforcement** (pre-execution checking before each tool call, with `HARD_STOP`, `SOFT_BLOCK`, and `TOLERATE` severity modes).
 
 ---
 
@@ -222,9 +222,25 @@ result = agent.run("do the task")
 | Severity | Behaviour |
 |----------|-----------|
 | `HARD_STOP` | The offending tool call is **not executed**; the run stops immediately. |
+| `SOFT_BLOCK` | The offending tool call is **not executed**; the agent receives the constraint-violation detail as an observation and may self-correct.  Escalates to `HARD_STOP` after `max_soft_attempts` blocked attempts on the same constraint (default: 3). |
 | `TOLERATE` | A warning is logged and execution continues. |
 
 Default severity is `HARD_STOP`.  Override per-constraint via `constraint_severities` dict or globally via `default_severity`.
+
+`max_soft_attempts` (default `3`) controls how many `SOFT_BLOCK` attempts are allowed before escalation:
+
+```python
+agent = ToolCallingAgentWithConstraints(
+    tools=my_tools,
+    model=my_model,
+    constraints=my_constraints,
+    constraint_severities={"order_check": ConstraintSeverity.SOFT_BLOCK},
+    max_soft_attempts=5,
+)
+status = agent.get_constraint_status()
+# status["soft_blocked_calls"]  — list of blocked attempts with step/constraint/detail
+# status["soft_block_counts"]   — {constraint_name: num_blocks}
+```
 
 ---
 

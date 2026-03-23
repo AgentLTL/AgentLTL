@@ -8,6 +8,8 @@ built and evaluated against a set of FOLTL constraints.  Depending on the
 constraint's severity the agent either:
 
 * **HARD_STOP** – aborts the run immediately (the tool call is never executed).
+* **SOFT_BLOCK** – blocks the call, returns a constraint-violation observation to
+  the model so it can self-correct, and continues the run.
 * **TOLERATE** – logs a warning and continues execution.
 
 The ``final_answer`` tool is always exempt from constraint checking because by the
@@ -60,6 +62,11 @@ class ConstraintSeverity(enum.Enum):
     HARD_STOP = "HARD_STOP"
     """Abort the run immediately – the offending tool call is **not** executed."""
 
+    SOFT_BLOCK = "SOFT_BLOCK"
+    """Block the call, return a constraint-violation observation to the model so it
+    can self-correct, and continue the run.  After *max_soft_attempts* blocks on
+    the same constraint the run is escalated to HARD_STOP."""
+
     TOLERATE = "TOLERATE"
     """Log the violation and continue execution."""
 
@@ -98,6 +105,16 @@ class ConstraintViolationError(AgentError):
         super().__init__(msg, logger=logger_to_use)
 
 
+class _SoftBlockSignal(Exception):
+    """Internal signal raised inside process_single_tool_call_constrained when a
+    SOFT_BLOCK constraint fires.  Caught by the outer generator to yield feedback."""
+
+    def __init__(self, tool_call, violation: "ConstraintViolation", count: int):
+        self.tool_call = tool_call
+        self.violation = violation
+        self.count = count
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # The constrained agent
 # ─────────────────────────────────────────────────────────────────────────────
@@ -119,6 +136,9 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
         default to ``HARD_STOP``.
     default_severity : ConstraintSeverity
         Fallback severity for constraints that are not in *constraint_severities*.
+    max_soft_attempts : int
+        Number of SOFT_BLOCK attempts allowed on a single constraint before
+        escalating to HARD_STOP.  Default: 3.
     """
 
     def __init__(
@@ -129,6 +149,7 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
         constraints: list | None = None,
         constraint_severities: Dict[str, ConstraintSeverity] | None = None,
         default_severity: ConstraintSeverity = ConstraintSeverity.HARD_STOP,
+        max_soft_attempts: int = 3,
         prompt_templates=None,
         planning_interval: int | None = None,
         stream_outputs: bool = False,
@@ -147,6 +168,7 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
         self._init_constraints = constraints or []
         self._init_severities = constraint_severities or {}
         self._default_severity = default_severity
+        self.max_soft_attempts = max_soft_attempts
 
         # Per-run mutable state (reset in _reset_constraint_state)
         self._active_constraints: list = []
@@ -157,6 +179,8 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
         self._stopped_by: str | None = None
         self._blocked_tool_call: Dict[str, Any] | None = None
         self._constraint_checks_count: int = 0
+        self._soft_block_counts: Dict[str, int] = {}
+        self._soft_blocked_calls: List[Dict[str, Any]] = []
 
     def _reset_constraint_state(self):
         """Reset per-run mutable state.  Called at the start of each ``run``."""
@@ -166,6 +190,8 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
         self._stopped_by = None
         self._blocked_tool_call = None
         self._constraint_checks_count = 0
+        self._soft_block_counts = {}
+        self._soft_blocked_calls = []
 
     def _severity_for(self, constraint_name: str) -> ConstraintSeverity:
         return self._active_severities.get(constraint_name, self._default_severity)
@@ -302,6 +328,37 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
                             detail=v.detail,
                             logger_to_use=self.logger,
                         )
+                    elif v.severity == ConstraintSeverity.SOFT_BLOCK.value:
+                        count = self._soft_block_counts.get(v.constraint_name, 0) + 1
+                        self._soft_block_counts[v.constraint_name] = count
+                        self._soft_blocked_calls.append({
+                            "step": step_num,
+                            "tool_name": tool_name,
+                            "tool_args": tool_arguments if isinstance(tool_arguments, dict) else {},
+                            "constraint": v.constraint_name,
+                            "detail": v.detail,
+                            "attempt": count,
+                        })
+                        logger.warning(
+                            "SOFT_BLOCK: constraint '%s' violated by tool '%s' "
+                            "(step %d, attempt %d/%d).",
+                            v.constraint_name, tool_name, step_num, count, self.max_soft_attempts,
+                        )
+                        if count >= self.max_soft_attempts:
+                            self._run_status = "stopped"
+                            self._stopped_by = v.constraint_name
+                            self.interrupt_switch = True
+                            raise ConstraintViolationError(
+                                constraint_name=v.constraint_name,
+                                tool_name=tool_name,
+                                tool_args=tool_arguments,
+                                detail=(
+                                    f"Max soft-block attempts ({self.max_soft_attempts}) exceeded "
+                                    f"for constraint '{v.constraint_name}'. Halting."
+                                ),
+                                logger_to_use=self.logger,
+                            )
+                        raise _SoftBlockSignal(tool_call=tool_call, violation=v, count=count)
                     else:
                         logger.warning(
                             "TOLERATE: constraint '%s' violated by tool '%s' (step %d). Continuing.",
@@ -344,15 +401,32 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
             )
 
         # Execute sequentially when constraints active (deterministic partial-trace ordering)
-        outputs: dict[str, ToolOutput] = {}
+        all_outputs: dict[str, ToolOutput] = {}
         for tool_call in parallel_calls.values():
-            tool_output = process_single_tool_call_constrained(tool_call)
-            outputs[tool_output.id] = tool_output
-            yield tool_output
+            try:
+                tool_output = process_single_tool_call_constrained(tool_call)
+                all_outputs[tool_output.id] = tool_output
+                yield tool_output
+            except _SoftBlockSignal as sig:
+                feedback = (
+                    f"[CONSTRAINT VIOLATION — {sig.violation.constraint_name}]\n"
+                    f"{sig.violation.detail}\n"
+                    f"The tool call '{sig.tool_call.name}' was NOT executed. "
+                    f"Please reconsider and call a different tool that satisfies the constraints."
+                )
+                feedback_output = ToolOutput(
+                    id=sig.tool_call.id,
+                    output=feedback,
+                    observation=feedback,
+                    is_final_answer=False,
+                    tool_call=sig.tool_call,
+                )
+                all_outputs[sig.tool_call.id] = feedback_output
+                yield feedback_output
 
         memory_step.tool_calls = [parallel_calls[k] for k in sorted(parallel_calls.keys())]
         memory_step.observations = memory_step.observations or ""
-        for tool_output in [outputs[k] for k in sorted(outputs.keys())]:
+        for tool_output in [all_outputs[k] for k in sorted(all_outputs.keys())]:
             memory_step.observations += tool_output.observation + "\n"
         memory_step.observations = (
             memory_step.observations.rstrip("\n") if memory_step.observations else memory_step.observations
@@ -364,12 +438,14 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
         Returns
         -------
         dict with keys:
-            ``status``            – ``"completed"`` or ``"stopped"``
-            ``stopped_by``        – name of the HARD_STOP constraint (or ``None``)
-            ``blocked_tool_call`` – blocked call dict (or ``None``)
-            ``violations``        – list of violation dicts
-            ``completed_trace``   – list of successfully-executed tool call dicts
-            ``constraint_checks`` – total number of constraint evaluations performed
+            ``status``              – ``"completed"`` or ``"stopped"``
+            ``stopped_by``          – name of the halting constraint (or ``None``)
+            ``blocked_tool_call``   – HARD_STOP blocked call dict (or ``None``)
+            ``violations``          – list of violation dicts (all severities)
+            ``completed_trace``     – list of successfully-executed tool call dicts
+            ``constraint_checks``   – total number of constraint evaluations performed
+            ``soft_blocked_calls``  – list of SOFT_BLOCK attempt dicts
+            ``soft_block_counts``   – mapping constraint_name → # of soft blocks
         """
         return {
             "status": self._run_status,
@@ -388,4 +464,6 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
             ],
             "completed_trace": list(self._completed_tool_calls),
             "constraint_checks": self._constraint_checks_count,
+            "soft_blocked_calls": list(self._soft_blocked_calls),
+            "soft_block_counts": dict(self._soft_block_counts),
         }
