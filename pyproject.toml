@@ -30,6 +30,11 @@ smolagents = [
     "smolagents>=1.22.0",
     "mcpadapt>=0.1.13",
 ]
+langchain = [
+    "langchain>=1.0",
+    "langgraph>=0.2",
+    "langchain-core>=0.3",
+]
 dev = [
     "pytest>=7.0",
     "ruff>=0.4",

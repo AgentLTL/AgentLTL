@@ -34,6 +34,9 @@ pip install agentltl
 
 # With smolagents runtime enforcement
 pip install "agentltl[smolagents]"
+
+# With LangChain runtime enforcement
+pip install "agentltl[langchain]"
 ```
 
 ---
@@ -65,12 +68,10 @@ print(result["compliance_score"])   # 1.0
 print(result["compliance_label"])   # FULL
 ```
 
-### Runtime enforcement
+### Runtime enforcement — smolagents
 
 ```python
-from smolagents import Tool
-from agentltl import Constraint, Before
-from agentltl.integrations.smolagents import AgentWithConstraints, ConstraintSeverity
+from agentltl import Constraint, Before, AgentWithConstraints, ConstraintSeverity
 
 constraints = [
     Constraint("fetch_before_process", Before("fetch_data", "process_data")),
@@ -82,6 +83,28 @@ agent = AgentWithConstraints(
     constraint_severities={"fetch_before_process": ConstraintSeverity.HARD_STOP},
     max_soft_attempts=3,
     soft_block_mode="cumulative",
+    backend="smolagents",   # default
+)
+
+result = agent.run("Fetch and then process the data.")
+print(result["metrics"]["run_status"])           # "completed" or "stopped"
+print(result["metrics"]["constraint_violations"]) # list of violations
+```
+
+### Runtime enforcement — LangChain
+
+```python
+from langchain_openai import ChatOpenAI
+from agentltl import Constraint, Before, AgentWithConstraints, ConstraintSeverity
+
+agent = AgentWithConstraints(
+    tools=[fetch_tool, process_tool],  # LangChain BaseTool instances
+    constraints=[Constraint("fetch_before_process", Before("fetch_data", "process_data"))],
+    constraint_severities={"fetch_before_process": ConstraintSeverity.SOFT_BLOCK},
+    max_soft_attempts=3,
+    soft_block_mode="hybrid",
+    model_instance=ChatOpenAI(model="gpt-4o-mini"),
+    backend="langchain",
 )
 
 result = agent.run("Fetch and then process the data.")
@@ -144,9 +167,41 @@ formula = parse('before("fetch", "save") & F(called("done"))')
 
 ## Runtime Enforcement
 
-### ToolCallingAgentWithConstraints
+### AgentWithConstraints (backend-agnostic)
 
-The low-level integration extends smolagents' `ToolCallingAgent` to check constraints *before* each tool call:
+The top-level `AgentWithConstraints` supports both smolagents and LangChain backends
+via the `backend=` parameter (default: `"smolagents"`):
+
+```python
+from agentltl import AgentWithConstraints, ConstraintSeverity, Constraint, Before
+
+# smolagents backend (default)
+agent = AgentWithConstraints(
+    tools=my_tools,
+    constraints=my_constraints,
+    constraint_severities={"order_check": ConstraintSeverity.HARD_STOP},
+    backend="smolagents",
+)
+
+# LangChain backend
+from langchain_openai import ChatOpenAI
+
+agent = AgentWithConstraints(
+    tools=my_lc_tools,       # LangChain BaseTool instances
+    constraints=my_constraints,
+    constraint_severities={"order_check": ConstraintSeverity.SOFT_BLOCK},
+    model_instance=ChatOpenAI(model="gpt-4o-mini"),
+    backend="langchain",
+)
+
+result = agent.run("do the task")
+# result["metrics"]["run_status"]  → "completed" | "stopped"
+```
+
+### ToolCallingAgentWithConstraints (smolagents low-level)
+
+The low-level smolagents integration extends `ToolCallingAgent` to check constraints
+*before* each tool call:
 
 ```python
 from agentltl.integrations.smolagents import (
@@ -164,41 +219,35 @@ result = agent.run("do the task", return_full_result=True)
 status = agent.get_constraint_status()
 ```
 
-### AgentWithConstraints
+### ConstraintEnforcementMiddleware (LangChain low-level)
 
-The higher-level wrapper adds MCP connectivity and metrics extraction:
+The low-level LangChain integration provides an `AgentMiddleware` for use with
+`create_agent()`:
 
 ```python
-from agentltl.integrations.smolagents import AgentWithConstraints
-
-# Local tools only
-agent = AgentWithConstraints(
-    tools=my_tools,
-    constraints=my_constraints,
+from agentltl.integrations.langchain import (
+    ConstraintEnforcementMiddleware,
+    ConstraintSeverity,
 )
+from langchain.agents import create_agent
 
-# With MCP servers
-agent = AgentWithConstraints(
-    tools=my_tools,
-    mcp_servers={
-        "filesystem": {
-            "url": "http://localhost:4000/mcp",
-            "transport": "streamable-http",
-        },
-    },
+mw = ConstraintEnforcementMiddleware(
     constraints=my_constraints,
+    constraint_severities={"order_check": ConstraintSeverity.SOFT_BLOCK},
+    max_soft_attempts=3,
+    soft_block_mode="hybrid",
 )
-
-result = agent.run("do the task")
-# result["metrics"]["run_status"]  → "completed" | "stopped"
+agent = create_agent(model=my_model, tools=my_tools, middleware=[mw.as_middleware()])
+result = agent.invoke({"messages": [HumanMessage(content="do the task")]})
+status = mw.get_constraint_status()
 ```
 
-### AgentWithAdditionalTools
+### AgentWithAdditionalTools (smolagents, MCP-enabled)
 
-General-purpose agent with multi-server MCP support:
+General-purpose smolagents agent with multi-server MCP support:
 
 ```python
-from agentltl.integrations.smolagents import AgentWithAdditionalTools
+from agentltl import AgentWithAdditionalTools
 
 agent = AgentWithAdditionalTools(
     tools=my_local_tools,

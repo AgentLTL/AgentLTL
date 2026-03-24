@@ -49,75 +49,31 @@ from smolagents.models import ChatMessage
 from smolagents.monitoring import LogLevel
 from smolagents.utils import AgentError
 
+from agentltl.enforcement import (
+    ConstraintSeverity,
+    SoftBlockMode,
+    ConstraintViolation,
+    ConstraintViolationError as _BaseConstraintViolationError,
+)
+
 logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Public types
+# smolagents-compatible ConstraintViolationError
 # ─────────────────────────────────────────────────────────────────────────────
 
-class ConstraintSeverity(enum.Enum):
-    """How the agent should react when a constraint is violated at runtime."""
-
-    HARD_STOP = "HARD_STOP"
-    """Abort the run immediately – the offending tool call is **not** executed."""
-
-    SOFT_BLOCK = "SOFT_BLOCK"
-    """Block the call, return a constraint-violation observation to the model so it
-    can self-correct, and continue the run.  Escalates to HARD_STOP after the
-    configured soft-block threshold (see :class:`SoftBlockMode`)."""
-
-    TOLERATE = "TOLERATE"
-    """Log the violation and continue execution."""
-
-
-class SoftBlockMode(enum.Enum):
-    """Escalation counting strategy for SOFT_BLOCK constraints.
-
-    CUMULATIVE
-        Count every violation of a constraint across the whole run.
-        Escalates when the total reaches *max_soft_attempts*.  (Default.)
-
-    CONSECUTIVE
-        Count consecutive violations.  The counter resets to zero whenever a
-        tool call completes successfully without triggering the same constraint.
-        Escalates when *max_consecutive_soft_attempts* consecutive violations
-        occur.  Catches tight retry loops while forgiving occasional re-offences
-        separated by valid work.
-
-    HYBRID
-        Escalates on *either* condition: consecutive violations reach
-        *max_consecutive_soft_attempts* (tight-loop detection) OR total
-        violations reach *max_soft_attempts* (persistent-disregard detection).
-    """
-
-    CUMULATIVE  = "cumulative"
-    CONSECUTIVE = "consecutive"
-    HYBRID      = "hybrid"
-
-
-@dataclass
-class ConstraintViolation:
-    """Record of a single constraint violation detected at runtime."""
-
-    constraint_name: str
-    severity: str  # "HARD_STOP" or "TOLERATE"
-    step_number: int
-    tool_name: str
-    tool_args: Any
-    detail: str = ""
-
-
-class ConstraintViolationError(AgentError):
+class ConstraintViolationError(_BaseConstraintViolationError, AgentError):
     """Raised when a constraint blocks a tool call before execution.
 
-    Inherits from :class:`AgentError` so that the smolagents run-loop catches
-    it in the standard ``except AgentError`` handler and records it on the
-    :class:`ActionStep`.
+    Subclasses both the framework-agnostic
+    :class:`agentltl.enforcement.ConstraintViolationError` **and** smolagents'
+    :class:`AgentError`, so the smolagents run-loop catches it via its standard
+    ``except AgentError`` handler.
 
-    violation_type
-        ``"HARD_STOP"``             – constraint fired immediately, no retries.
-        ``"SOFT_BLOCK_ESCALATION"`` – soft-block threshold reached after N attempts.
+    The ``logger_to_use`` parameter is accepted for backward compatibility —
+    it is used to call ``logger_to_use.log_error()`` before the exception is
+    raised, matching smolagents' convention.
     """
 
     def __init__(
@@ -131,44 +87,25 @@ class ConstraintViolationError(AgentError):
         threshold_str: str = "",
         logger_to_use=None,
     ):
-        self.constraint_name = constraint_name
-        self.tool_name = tool_name
-        self.tool_args = tool_args
-        self.violation_detail = detail
-        self.violation_type = violation_type
-        self.soft_block_mode = soft_block_mode
-        self.threshold_str = threshold_str
+        # Build the structured message and set all fields via the base class.
+        _BaseConstraintViolationError.__init__(
+            self,
+            constraint_name=constraint_name,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            detail=detail,
+            violation_type=violation_type,
+            soft_block_mode=soft_block_mode,
+            threshold_str=threshold_str,
+        )
+        # Initialise AgentError with the already-built message.
+        # This also calls logger_to_use.log_error(msg) if a logger was supplied.
+        AgentError.__init__(self, str(self.args[0]), logger=logger_to_use)
 
-        if violation_type == "SOFT_BLOCK_ESCALATION":
-            msg = (
-                f"[CONSTRAINT ESCALATION — {soft_block_mode or 'unknown'} mode, {threshold_str}]\n"
-                f"Constraint '{constraint_name}' has been violated too many times.\n"
-                f"Tool call '{tool_name}' is now permanently blocked.\n"
-                f"Detail: {detail}\n"
-                f"You must take a fundamentally different approach to satisfy this constraint."
-            )
-        else:  # HARD_STOP
-            msg = (
-                f"[CONSTRAINT HARD-STOP]\n"
-                f"Constraint '{constraint_name}' was violated by tool call '{tool_name}'.\n"
-                f"The tool was NOT executed.\n"
-                f"Detail: {detail}\n"
-                f"Do NOT attempt this tool call. Choose a different action."
-            )
-        super().__init__(msg, logger=logger_to_use)
 
-    def dict(self) -> dict:
-        return {
-            "type": "ConstraintViolationError",
-            "violation_type": self.violation_type,
-            "constraint_name": self.constraint_name,
-            "tool_name": self.tool_name,
-            "detail": self.violation_detail,
-            "soft_block_mode": self.soft_block_mode,
-            "threshold_str": self.threshold_str,
-            "message": str(self.args[0]),
-        }
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Internal signal (smolagents-specific)
+# ─────────────────────────────────────────────────────────────────────────────
 
 class _SoftBlockSignal(Exception):
     """Internal signal raised inside process_single_tool_call_constrained when a
@@ -438,7 +375,7 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
                         else:
                             consec = count  # mirrors cumulative for logging in CUMULATIVE mode
 
-                        # Build human-readable threshold string for logs and model feedback
+                        # Build human-readable threshold string
                         if self.soft_block_mode == SoftBlockMode.CUMULATIVE:
                             threshold_str = f"total {count}/{self.max_soft_attempts}"
                         elif self.soft_block_mode == SoftBlockMode.CONSECUTIVE:
@@ -459,12 +396,11 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
                             "consecutive": consec,
                         })
                         logger.warning(
-                            "SOFT_BLOCK: constraint '%s' violated by tool '%s' "
-                            "(step %d, %s).",
+                            "SOFT_BLOCK: constraint '%s' violated by tool '%s' (step %d, %s).",
                             v.constraint_name, tool_name, step_num, threshold_str,
                         )
 
-                        # Determine whether to escalate based on the active mode
+                        # Determine whether to escalate
                         if self.soft_block_mode == SoftBlockMode.CUMULATIVE:
                             escalate = count >= self.max_soft_attempts
                             escalation_detail = (
@@ -557,8 +493,7 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
                 tool_output = process_single_tool_call_constrained(tool_call)
                 all_outputs[tool_output.id] = tool_output
                 yield tool_output
-                # Successful execution: reset consecutive streak so the agent
-                # is not penalised for past violations separated by valid work.
+                # Successful execution: reset consecutive streak
                 if self.soft_block_mode in (SoftBlockMode.CONSECUTIVE, SoftBlockMode.HYBRID):
                     self._consecutive_soft_block_counts.clear()
             except _SoftBlockSignal as sig:

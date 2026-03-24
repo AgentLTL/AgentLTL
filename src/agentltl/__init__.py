@@ -106,6 +106,22 @@ from ._constraints import (
 # ── Parser ───────────────────────────────────────────────────────────────────
 from ._parser import parse
 
+# ── Enforcement types (framework-agnostic) ────────────────────────────────────
+from .enforcement import (
+    ConstraintSeverity,
+    SoftBlockMode,
+    ConstraintViolation,
+    ConstraintViolationError,
+)
+
+# ── Backend-agnostic agent wrappers ───────────────────────────────────────────
+from .agents import (
+    Agent,
+    AgentWithAdditionalTools,
+    AgentWithSubAgents,
+    AgentWithConstraints,
+)
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -128,4 +144,10 @@ __all__ = [
     "Constraint", "ConstraintResult", "ComplianceResult", "verify_trace",
     # Parser
     "parse",
+    # Enforcement types
+    "ConstraintSeverity", "SoftBlockMode",
+    "ConstraintViolation", "ConstraintViolationError",
+    # Agent wrappers
+    "Agent", "AgentWithAdditionalTools",
+    "AgentWithSubAgents", "AgentWithConstraints",
 ]
