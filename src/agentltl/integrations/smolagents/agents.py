@@ -948,6 +948,14 @@ class AgentWithConstraints(Agent):
                               *default_severity*.
         default_severity:     Fallback severity for unmapped constraints
                               (default: ``HARD_STOP``).
+        max_soft_attempts:    For ``cumulative`` and ``hybrid`` modes: maximum
+                              total SOFT_BLOCK violations per constraint before
+                              escalating (default: ``3``).
+        soft_block_mode:      Escalation counting strategy — ``"cumulative"``
+                              (default), ``"consecutive"``, or ``"hybrid"``.
+        max_consecutive_soft_attempts: For ``consecutive`` and ``hybrid`` modes:
+                              maximum back-to-back violations before escalating.
+                              Defaults to *max_soft_attempts* when not set.
         model:                Model name / ID.
         api_key:              API key for the model provider.
         provider:             HF Inference provider name.
@@ -963,6 +971,9 @@ class AgentWithConstraints(Agent):
         constraints: Optional[List[Any]] = None,
         constraint_severities: Optional[Dict[str, ConstraintSeverity]] = None,
         default_severity: ConstraintSeverity = ConstraintSeverity.HARD_STOP,
+        max_soft_attempts: int = 3,
+        soft_block_mode: str = "cumulative",
+        max_consecutive_soft_attempts: Optional[int] = None,
         model: Optional[str] = None,
         api_key: Optional[str] = None,
         provider: Optional[str] = None,
@@ -995,6 +1006,9 @@ class AgentWithConstraints(Agent):
             constraints=self._init_constraints,
             constraint_severities=self._init_severities,
             default_severity=self._default_severity,
+            max_soft_attempts=max_soft_attempts,
+            soft_block_mode=soft_block_mode,
+            max_consecutive_soft_attempts=max_consecutive_soft_attempts,
             max_steps=max_steps,
         )
 

@@ -80,6 +80,8 @@ agent = AgentWithConstraints(
     tools=[FetchTool(), ProcessTool()],
     constraints=constraints,
     constraint_severities={"fetch_before_process": ConstraintSeverity.HARD_STOP},
+    max_soft_attempts=3,
+    soft_block_mode="cumulative",
 )
 
 result = agent.run("Fetch and then process the data.")
@@ -221,26 +223,46 @@ result = agent.run("do the task")
 
 | Severity | Behaviour |
 |----------|-----------|
-| `HARD_STOP` | The offending tool call is **not executed**; the run stops immediately. |
-| `SOFT_BLOCK` | The offending tool call is **not executed**; the agent receives the constraint-violation detail as an observation and may self-correct.  Escalates to `HARD_STOP` after `max_soft_attempts` blocked attempts on the same constraint (default: 3). |
+| `HARD_STOP` | The offending tool call is **not executed**; the run stops immediately.  A `ConstraintViolationError` with `violation_type="HARD_STOP"` is recorded on the step. |
+| `SOFT_BLOCK` | The offending tool call is **not executed**; the agent receives a structured `ConstraintViolationError` observation and may self-correct.  Escalates to a hard-stop after a configurable number of blocked attempts (controlled by `SoftBlockMode` — see below). |
 | `TOLERATE` | A warning is logged and execution continues. |
 
 Default severity is `HARD_STOP`.  Override per-constraint via `constraint_severities` dict or globally via `default_severity`.
 
-`max_soft_attempts` (default `3`) controls how many `SOFT_BLOCK` attempts are allowed before escalation:
+### Soft-block escalation modes (`SoftBlockMode`)
+
+| Mode | Escalation trigger | Reset on success? |
+|------|--------------------|-------------------|
+| `cumulative` *(default)* | total violations for a constraint ≥ `max_soft_attempts` | No |
+| `consecutive` | back-to-back violations ≥ `max_consecutive_soft_attempts` | Yes — counter resets after each successful tool call |
+| `hybrid` | either `consecutive` **or** `cumulative` threshold reached | Consecutive counter resets; cumulative keeps counting |
 
 ```python
+from agentltl.integrations.smolagents import (
+    ToolCallingAgentWithConstraints, ConstraintSeverity, SoftBlockMode,
+)
+
 agent = ToolCallingAgentWithConstraints(
     tools=my_tools,
     model=my_model,
     constraints=my_constraints,
     constraint_severities={"order_check": ConstraintSeverity.SOFT_BLOCK},
-    max_soft_attempts=5,
+    max_soft_attempts=5,                    # cumulative cap (all modes)
+    soft_block_mode="hybrid",               # or SoftBlockMode.HYBRID
+    max_consecutive_soft_attempts=3,        # consecutive cap (consecutive/hybrid only)
 )
 status = agent.get_constraint_status()
-# status["soft_blocked_calls"]  — list of blocked attempts with step/constraint/detail
-# status["soft_block_counts"]   — {constraint_name: num_blocks}
+# status["soft_blocked_calls"]              — list of blocked attempts with step/constraint/detail
+# status["soft_block_counts"]              — {constraint_name: num_blocks}
+# status["soft_block_mode"]               — e.g. "hybrid"
+# status["consecutive_soft_block_counts"] — {constraint_name: current_consecutive}
 ```
+
+When a `SOFT_BLOCK` escalates, the agent history receives a clearly labelled message
+(e.g. `[CONSTRAINT ESCALATION — hybrid mode, consecutive 3/3]`) that names the mode
+and threshold, instructing the agent to take a fundamentally different approach.
+`ConstraintViolationError.dict()` exposes `violation_type`, `soft_block_mode`, and
+`threshold_str` as structured fields for downstream tooling.
 
 ---
 

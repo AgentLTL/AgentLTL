@@ -64,11 +64,36 @@ class ConstraintSeverity(enum.Enum):
 
     SOFT_BLOCK = "SOFT_BLOCK"
     """Block the call, return a constraint-violation observation to the model so it
-    can self-correct, and continue the run.  After *max_soft_attempts* blocks on
-    the same constraint the run is escalated to HARD_STOP."""
+    can self-correct, and continue the run.  Escalates to HARD_STOP after the
+    configured soft-block threshold (see :class:`SoftBlockMode`)."""
 
     TOLERATE = "TOLERATE"
     """Log the violation and continue execution."""
+
+
+class SoftBlockMode(enum.Enum):
+    """Escalation counting strategy for SOFT_BLOCK constraints.
+
+    CUMULATIVE
+        Count every violation of a constraint across the whole run.
+        Escalates when the total reaches *max_soft_attempts*.  (Default.)
+
+    CONSECUTIVE
+        Count consecutive violations.  The counter resets to zero whenever a
+        tool call completes successfully without triggering the same constraint.
+        Escalates when *max_consecutive_soft_attempts* consecutive violations
+        occur.  Catches tight retry loops while forgiving occasional re-offences
+        separated by valid work.
+
+    HYBRID
+        Escalates on *either* condition: consecutive violations reach
+        *max_consecutive_soft_attempts* (tight-loop detection) OR total
+        violations reach *max_soft_attempts* (persistent-disregard detection).
+    """
+
+    CUMULATIVE  = "cumulative"
+    CONSECUTIVE = "consecutive"
+    HYBRID      = "hybrid"
 
 
 @dataclass
@@ -84,35 +109,84 @@ class ConstraintViolation:
 
 
 class ConstraintViolationError(AgentError):
-    """Raised when a HARD_STOP constraint is violated before tool execution.
+    """Raised when a constraint blocks a tool call before execution.
 
     Inherits from :class:`AgentError` so that the smolagents run-loop catches
     it in the standard ``except AgentError`` handler and records it on the
     :class:`ActionStep`.
+
+    violation_type
+        ``"HARD_STOP"``             – constraint fired immediately, no retries.
+        ``"SOFT_BLOCK_ESCALATION"`` – soft-block threshold reached after N attempts.
     """
 
-    def __init__(self, constraint_name: str, tool_name: str, tool_args: Any,
-                 detail: str = "", logger_to_use=None):
+    def __init__(
+        self,
+        constraint_name: str,
+        tool_name: str,
+        tool_args: Any,
+        detail: str = "",
+        violation_type: str = "HARD_STOP",
+        soft_block_mode: Optional[str] = None,
+        threshold_str: str = "",
+        logger_to_use=None,
+    ):
         self.constraint_name = constraint_name
         self.tool_name = tool_name
         self.tool_args = tool_args
         self.violation_detail = detail
-        msg = (
-            f"HARD_STOP constraint '{constraint_name}' violated by pending "
-            f"tool call '{tool_name}' with args {tool_args}. "
-            f"Detail: {detail}"
-        )
+        self.violation_type = violation_type
+        self.soft_block_mode = soft_block_mode
+        self.threshold_str = threshold_str
+
+        if violation_type == "SOFT_BLOCK_ESCALATION":
+            msg = (
+                f"[CONSTRAINT ESCALATION — {soft_block_mode or 'unknown'} mode, {threshold_str}]\n"
+                f"Constraint '{constraint_name}' has been violated too many times.\n"
+                f"Tool call '{tool_name}' is now permanently blocked.\n"
+                f"Detail: {detail}\n"
+                f"You must take a fundamentally different approach to satisfy this constraint."
+            )
+        else:  # HARD_STOP
+            msg = (
+                f"[CONSTRAINT HARD-STOP]\n"
+                f"Constraint '{constraint_name}' was violated by tool call '{tool_name}'.\n"
+                f"The tool was NOT executed.\n"
+                f"Detail: {detail}\n"
+                f"Do NOT attempt this tool call. Choose a different action."
+            )
         super().__init__(msg, logger=logger_to_use)
+
+    def dict(self) -> dict:
+        return {
+            "type": "ConstraintViolationError",
+            "violation_type": self.violation_type,
+            "constraint_name": self.constraint_name,
+            "tool_name": self.tool_name,
+            "detail": self.violation_detail,
+            "soft_block_mode": self.soft_block_mode,
+            "threshold_str": self.threshold_str,
+            "message": str(self.args[0]),
+        }
 
 
 class _SoftBlockSignal(Exception):
     """Internal signal raised inside process_single_tool_call_constrained when a
     SOFT_BLOCK constraint fires.  Caught by the outer generator to yield feedback."""
 
-    def __init__(self, tool_call, violation: "ConstraintViolation", count: int):
+    def __init__(
+        self,
+        tool_call,
+        violation: "ConstraintViolation",
+        count: int,
+        consec: int = 0,
+        threshold_str: str = "",
+    ):
         self.tool_call = tool_call
         self.violation = violation
         self.count = count
+        self.consec = consec
+        self.threshold_str = threshold_str
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -137,8 +211,17 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
     default_severity : ConstraintSeverity
         Fallback severity for constraints that are not in *constraint_severities*.
     max_soft_attempts : int
-        Number of SOFT_BLOCK attempts allowed on a single constraint before
-        escalating to HARD_STOP.  Default: 3.
+        For ``CUMULATIVE`` and ``HYBRID`` modes: maximum total SOFT_BLOCK
+        violations allowed per constraint per run before escalating.  For
+        ``CONSECUTIVE`` mode this is unused (use *max_consecutive_soft_attempts*).
+        Default: 3.
+    soft_block_mode : str | SoftBlockMode
+        Escalation counting strategy.  One of ``"cumulative"`` (default),
+        ``"consecutive"``, or ``"hybrid"``.  See :class:`SoftBlockMode`.
+    max_consecutive_soft_attempts : int | None
+        For ``CONSECUTIVE`` and ``HYBRID`` modes: maximum *consecutive*
+        violations before escalating.  Defaults to *max_soft_attempts* if not
+        set.
     """
 
     def __init__(
@@ -150,6 +233,8 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
         constraint_severities: Dict[str, ConstraintSeverity] | None = None,
         default_severity: ConstraintSeverity = ConstraintSeverity.HARD_STOP,
         max_soft_attempts: int = 3,
+        soft_block_mode: "str | SoftBlockMode" = "cumulative",
+        max_consecutive_soft_attempts: "int | None" = None,
         prompt_templates=None,
         planning_interval: int | None = None,
         stream_outputs: bool = False,
@@ -169,6 +254,16 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
         self._init_severities = constraint_severities or {}
         self._default_severity = default_severity
         self.max_soft_attempts = max_soft_attempts
+        self.soft_block_mode = (
+            SoftBlockMode(soft_block_mode)
+            if isinstance(soft_block_mode, str)
+            else soft_block_mode
+        )
+        self.max_consecutive_soft_attempts = (
+            max_consecutive_soft_attempts
+            if max_consecutive_soft_attempts is not None
+            else max_soft_attempts
+        )
 
         # Per-run mutable state (reset in _reset_constraint_state)
         self._active_constraints: list = []
@@ -180,6 +275,7 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
         self._blocked_tool_call: Dict[str, Any] | None = None
         self._constraint_checks_count: int = 0
         self._soft_block_counts: Dict[str, int] = {}
+        self._consecutive_soft_block_counts: Dict[str, int] = {}
         self._soft_blocked_calls: List[Dict[str, Any]] = []
 
     def _reset_constraint_state(self):
@@ -191,6 +287,7 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
         self._blocked_tool_call = None
         self._constraint_checks_count = 0
         self._soft_block_counts = {}
+        self._consecutive_soft_block_counts = {}
         self._soft_blocked_calls = []
 
     def _severity_for(self, constraint_name: str) -> ConstraintSeverity:
@@ -326,11 +423,32 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
                             tool_name=tool_name,
                             tool_args=tool_arguments,
                             detail=v.detail,
+                            violation_type="HARD_STOP",
                             logger_to_use=self.logger,
                         )
                     elif v.severity == ConstraintSeverity.SOFT_BLOCK.value:
+                        # Cumulative counter (always incremented)
                         count = self._soft_block_counts.get(v.constraint_name, 0) + 1
                         self._soft_block_counts[v.constraint_name] = count
+
+                        # Consecutive counter (CONSECUTIVE / HYBRID modes only)
+                        if self.soft_block_mode in (SoftBlockMode.CONSECUTIVE, SoftBlockMode.HYBRID):
+                            consec = self._consecutive_soft_block_counts.get(v.constraint_name, 0) + 1
+                            self._consecutive_soft_block_counts[v.constraint_name] = consec
+                        else:
+                            consec = count  # mirrors cumulative for logging in CUMULATIVE mode
+
+                        # Build human-readable threshold string for logs and model feedback
+                        if self.soft_block_mode == SoftBlockMode.CUMULATIVE:
+                            threshold_str = f"total {count}/{self.max_soft_attempts}"
+                        elif self.soft_block_mode == SoftBlockMode.CONSECUTIVE:
+                            threshold_str = f"consecutive {consec}/{self.max_consecutive_soft_attempts}"
+                        else:  # HYBRID
+                            threshold_str = (
+                                f"consecutive {consec}/{self.max_consecutive_soft_attempts}, "
+                                f"total {count}/{self.max_soft_attempts}"
+                            )
+
                         self._soft_blocked_calls.append({
                             "step": step_num,
                             "tool_name": tool_name,
@@ -338,13 +456,39 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
                             "constraint": v.constraint_name,
                             "detail": v.detail,
                             "attempt": count,
+                            "consecutive": consec,
                         })
                         logger.warning(
                             "SOFT_BLOCK: constraint '%s' violated by tool '%s' "
-                            "(step %d, attempt %d/%d).",
-                            v.constraint_name, tool_name, step_num, count, self.max_soft_attempts,
+                            "(step %d, %s).",
+                            v.constraint_name, tool_name, step_num, threshold_str,
                         )
-                        if count >= self.max_soft_attempts:
+
+                        # Determine whether to escalate based on the active mode
+                        if self.soft_block_mode == SoftBlockMode.CUMULATIVE:
+                            escalate = count >= self.max_soft_attempts
+                            escalation_detail = (
+                                f"Max soft-block attempts ({self.max_soft_attempts}) exceeded "
+                                f"for constraint '{v.constraint_name}'. Halting."
+                            )
+                        elif self.soft_block_mode == SoftBlockMode.CONSECUTIVE:
+                            escalate = consec >= self.max_consecutive_soft_attempts
+                            escalation_detail = (
+                                f"Max consecutive soft-block attempts "
+                                f"({self.max_consecutive_soft_attempts}) exceeded "
+                                f"for constraint '{v.constraint_name}'. Halting."
+                            )
+                        else:  # HYBRID
+                            escalate = (
+                                consec >= self.max_consecutive_soft_attempts
+                                or count >= self.max_soft_attempts
+                            )
+                            escalation_detail = (
+                                f"Soft-block escalation threshold reached for constraint "
+                                f"'{v.constraint_name}' ({threshold_str}). Halting."
+                            )
+
+                        if escalate:
                             self._run_status = "stopped"
                             self._stopped_by = v.constraint_name
                             self.interrupt_switch = True
@@ -352,13 +496,19 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
                                 constraint_name=v.constraint_name,
                                 tool_name=tool_name,
                                 tool_args=tool_arguments,
-                                detail=(
-                                    f"Max soft-block attempts ({self.max_soft_attempts}) exceeded "
-                                    f"for constraint '{v.constraint_name}'. Halting."
-                                ),
+                                detail=escalation_detail,
+                                violation_type="SOFT_BLOCK_ESCALATION",
+                                soft_block_mode=self.soft_block_mode.value,
+                                threshold_str=threshold_str,
                                 logger_to_use=self.logger,
                             )
-                        raise _SoftBlockSignal(tool_call=tool_call, violation=v, count=count)
+                        raise _SoftBlockSignal(
+                            tool_call=tool_call,
+                            violation=v,
+                            count=count,
+                            consec=consec,
+                            threshold_str=threshold_str,
+                        )
                     else:
                         logger.warning(
                             "TOLERATE: constraint '%s' violated by tool '%s' (step %d). Continuing.",
@@ -407,12 +557,18 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
                 tool_output = process_single_tool_call_constrained(tool_call)
                 all_outputs[tool_output.id] = tool_output
                 yield tool_output
+                # Successful execution: reset consecutive streak so the agent
+                # is not penalised for past violations separated by valid work.
+                if self.soft_block_mode in (SoftBlockMode.CONSECUTIVE, SoftBlockMode.HYBRID):
+                    self._consecutive_soft_block_counts.clear()
             except _SoftBlockSignal as sig:
                 feedback = (
-                    f"[CONSTRAINT VIOLATION — {sig.violation.constraint_name}]\n"
+                    f"[CONSTRAINT VIOLATION — {sig.violation.constraint_name}]"
+                    f" ({sig.threshold_str})\n"
                     f"{sig.violation.detail}\n"
                     f"The tool call '{sig.tool_call.name}' was NOT executed. "
-                    f"Please reconsider and call a different tool that satisfies the constraints."
+                    f"Please reconsider and call a different tool or arguments "
+                    f"that satisfy the constraints."
                 )
                 feedback_output = ToolOutput(
                     id=sig.tool_call.id,
@@ -438,14 +594,16 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
         Returns
         -------
         dict with keys:
-            ``status``              – ``"completed"`` or ``"stopped"``
-            ``stopped_by``          – name of the halting constraint (or ``None``)
-            ``blocked_tool_call``   – HARD_STOP blocked call dict (or ``None``)
-            ``violations``          – list of violation dicts (all severities)
-            ``completed_trace``     – list of successfully-executed tool call dicts
-            ``constraint_checks``   – total number of constraint evaluations performed
-            ``soft_blocked_calls``  – list of SOFT_BLOCK attempt dicts
-            ``soft_block_counts``   – mapping constraint_name → # of soft blocks
+            ``status``                       – ``"completed"`` or ``"stopped"``
+            ``stopped_by``                   – name of the halting constraint (or ``None``)
+            ``blocked_tool_call``            – HARD_STOP blocked call dict (or ``None``)
+            ``violations``                   – list of violation dicts (all severities)
+            ``completed_trace``              – list of successfully-executed tool call dicts
+            ``constraint_checks``            – total number of constraint evaluations performed
+            ``soft_blocked_calls``           – list of SOFT_BLOCK attempt dicts
+            ``soft_block_counts``            – mapping constraint_name → # of soft blocks
+            ``soft_block_mode``              – active escalation mode value string
+            ``consecutive_soft_block_counts`` – mapping constraint_name → current consecutive count
         """
         return {
             "status": self._run_status,
@@ -466,4 +624,6 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
             "constraint_checks": self._constraint_checks_count,
             "soft_blocked_calls": list(self._soft_blocked_calls),
             "soft_block_counts": dict(self._soft_block_counts),
+            "soft_block_mode": self.soft_block_mode.value,
+            "consecutive_soft_block_counts": dict(self._consecutive_soft_block_counts),
         }

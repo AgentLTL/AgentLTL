@@ -19,6 +19,7 @@ Install with::
 from .constrained_agent import (
     ToolCallingAgentWithConstraints,
     ConstraintSeverity,
+    SoftBlockMode,
     ConstraintViolation,
     ConstraintViolationError,
 )
@@ -34,6 +35,7 @@ from .agents import (
 __all__ = [
     "ToolCallingAgentWithConstraints",
     "ConstraintSeverity",
+    "SoftBlockMode",
     "ConstraintViolation",
     "ConstraintViolationError",
     "Agent",
