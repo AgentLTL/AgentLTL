@@ -114,6 +114,188 @@ print(result["metrics"]["constraint_violations"]) # list of violations
 
 ---
 
+## Walkthrough: Agent → Trace → Violation Analysis
+
+This section walks through the full cycle end-to-end using a three-step data pipeline: `fetch_data → process_data → save_results`.  No LLM is required for steps 3–5; only the live-agent steps need `HF_TOKEN`.
+
+### 1. Define tools and constraints
+
+```python
+import os
+from smolagents import Tool
+from agentltl import Constraint, Before, CalledNTimes, verify_trace
+from agentltl.integrations.smolagents import AgentWithConstraints, ConstraintSeverity
+
+
+class FetchTool(Tool):
+    name        = "fetch_data"
+    description = "Fetch raw records from the database. Always call this first."
+    inputs      = {}
+    output_type = "string"
+    def forward(self): return "Fetched: 120 records"
+
+
+class ProcessTool(Tool):
+    name        = "process_data"
+    description = "Normalise fetched records. Call after fetch_data."
+    inputs      = {}
+    output_type = "string"
+    def forward(self): return "Processed: 120 records normalised"
+
+
+class SaveTool(Tool):
+    name        = "save_results"
+    description = "Save processed results to storage. Call after process_data."
+    inputs      = {}
+    output_type = "string"
+    def forward(self): return "Saved to s3://bucket/results.parquet"
+
+
+constraints = [
+    Constraint("fetch_before_process", Before("fetch_data",   "process_data"),  weight=2.0),
+    Constraint("process_before_save",  Before("process_data", "save_results"),  weight=2.0),
+    Constraint("save_once",            CalledNTimes("save_results", 1, "=="),   weight=1.0),
+]
+```
+
+### 2. Run the agent with runtime enforcement
+
+```python
+agent = AgentWithConstraints(
+    tools=[FetchTool(), ProcessTool(), SaveTool()],
+    constraints=constraints,
+    constraint_severities={
+        "fetch_before_process": ConstraintSeverity.HARD_STOP,   # abort immediately
+        "process_before_save":  ConstraintSeverity.SOFT_BLOCK,  # block & let agent retry
+        "save_once":            ConstraintSeverity.TOLERATE,    # log only
+    },
+    max_soft_attempts=3,
+    model=os.environ.get("MODEL", "Qwen/Qwen3-32B-Instruct"),
+    max_steps=6,
+)
+
+result = agent.run("Fetch the data, process it, and save the results to storage.")
+```
+
+### 3. Inspect the raw trace
+
+`result["metrics"]["tool_calls"]` is a list of dicts, one per tool call, in execution order:
+
+```python
+import json
+print(json.dumps(result["metrics"]["tool_calls"], indent=2))
+```
+
+```json
+[
+  {
+    "tool_name": "fetch_data",
+    "tool_args": {},
+    "tool_result": "Fetched: 120 records"
+  },
+  {
+    "tool_name": "process_data",
+    "tool_args": {},
+    "tool_result": "Processed: 120 records normalised"
+  },
+  {
+    "tool_name": "save_results",
+    "tool_args": {},
+    "tool_result": "Saved to s3://bucket/results.parquet"
+  }
+]
+```
+
+### 4. Check runtime constraint status
+
+```python
+m = result["metrics"]
+print(f"Run status        : {m['run_status']}")
+print(f"Stopped by        : {m['stopped_by_constraint']}")
+print(f"Constraint checks : {m['constraint_checks']}")
+print(f"Violations        : {len(m['constraint_violations'])}")
+```
+
+```
+Run status        : completed
+Stopped by        : None
+Constraint checks : 3
+Violations        : 0
+```
+
+### 5. Post-hoc analysis with `verify_trace`
+
+```python
+report = verify_trace(result["metrics"], constraints)
+
+print(f"Tool sequence : {report['tool_sequence']}")
+print(f"Compliance    : {report['compliance_label']} ({report['compliance_score']:.2f})")
+print()
+for c in report["constraints"]:
+    status = "PASS" if c["passed"] else "FAIL"
+    print(f"  [{status}] {c['name']} (w={c['weight']}): {c['detail']}")
+```
+
+```
+Tool sequence : ['fetch_data', 'process_data', 'save_results']
+Compliance    : FULL (1.00)
+
+  [PASS] fetch_before_process (w=2.0): "fetch_data" (call #1) before "process_data" (call #2).
+  [PASS] process_before_save  (w=2.0): "process_data" (call #2) before "save_results" (call #3).
+  [PASS] save_once            (w=1.0): "save_results" called 1 time(s); expected == 1.
+```
+
+---
+
+### What a violation looks like
+
+Suppose the agent calls `process_data` before `fetch_data` — the `HARD_STOP` constraint fires.
+
+**Runtime output** (`result["metrics"]`):
+
+```
+Run status        : stopped
+Stopped by        : fetch_before_process
+Constraint checks : 1
+Violations        : 1
+```
+
+```python
+for v in result["metrics"]["constraint_violations"]:
+    print(f"[{v['severity']}] {v['constraint_name']} at step {v['step_number']}: {v['detail']}")
+```
+
+```
+[HARD_STOP] fetch_before_process at step 1: "fetch_data" was never called (cannot precede "process_data").
+```
+
+**Post-hoc analysis** on the partial trace (only the one completed call):
+
+```python
+partial_metrics = {
+    "tool_calls": [{"tool_name": "process_data"}]
+}
+report = verify_trace(partial_metrics, constraints)
+
+print(f"Compliance : {report['compliance_label']} ({report['compliance_score']:.2f})")
+print()
+for c in report["constraints"]:
+    status = "PASS" if c["passed"] else "FAIL"
+    print(f"  [{status}] {c['name']}: {c['detail']}")
+```
+
+```
+Compliance : VIOLATION (0.00)
+
+  [FAIL] fetch_before_process: "fetch_data" was never called (cannot precede "process_data").
+  [FAIL] process_before_save:  "save_results" was never called ("process_data" has no successor to precede).
+  [FAIL] save_once:            "save_results" called 0 time(s); expected == 1.
+```
+
+The compliance score is `1 − (2.0 + 2.0 + 1.0) / (2.0 + 2.0 + 1.0) = 0.00` because every constraint is violated.  A partial violation (e.g. only `save_once` fails) would give a non-zero score — `1 − 1.0 / 5.0 = 0.80`.
+
+---
+
 ## FOLTL Formula Reference
 
 | Formula | Meaning | Example |
