@@ -331,10 +331,28 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
             tool_name = tool_call.name
             tool_arguments = tool_call.arguments or {}
 
-            if tool_name != "final_answer" and self._active_constraints:
+            # final_answer is normally exempt from constraint checking.
+            # Constraints with applies_to_final_answer=True opt in to being
+            # checked before the Finish action (required for kappa_ground
+            # HARD_STOP / SOFT_BLOCK online enforcement).
+            _fa_constraints = [
+                c for c in self._active_constraints
+                if getattr(c, "applies_to_final_answer", False)
+            ]
+            _should_check = self._active_constraints and (
+                tool_name != "final_answer" or _fa_constraints
+            )
+            _constraints_for_check = (
+                _fa_constraints if tool_name == "final_answer" else self._active_constraints
+            )
+            if _should_check:
                 step_num = getattr(memory_step, "step_number", 0)
                 spec_metrics = self._build_speculative_trace(tool_name, tool_arguments, tool_call.id)
+                # Temporarily override active constraints for this evaluation
+                _saved = self._active_constraints
+                self._active_constraints = _constraints_for_check
                 violations = self._evaluate_constraints(spec_metrics, step_num, tool_name, tool_arguments)
+                self._active_constraints = _saved
 
                 for v in violations:
                     self._constraint_violations.append(v)

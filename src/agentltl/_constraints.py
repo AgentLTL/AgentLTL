@@ -51,6 +51,10 @@ class Constraint:
     formula: Formula
     weight: float = 1.0
     description: str = ""
+    applies_to_final_answer: bool = False
+    """When True, this constraint is also evaluated before the final_answer tool
+    is executed (online enforcement).  Default False preserves existing behaviour
+    where final_answer is always exempt from pre-execution constraint checks."""
 
     def __post_init__(self):
         if self.weight < 0:
