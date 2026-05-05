@@ -17,9 +17,13 @@ See ``docs/reference.md`` for the full return-value schema.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
 
 from agentltl.enforcement import ConstraintSeverity, SoftBlockMode
+from agentltl.runtime_safety import check_runtime_safety_or_warn
+
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -250,8 +254,16 @@ class AgentWithConstraints:
         model_instance: Optional[Any] = None,
         max_steps: int = 10,
         system_prompt: Optional[str] = None,
+        strict_runtime_safety: bool = False,
         backend: str = "smolagents",
     ) -> None:
+        check_runtime_safety_or_warn(
+            constraints or [],
+            constraint_severities,
+            default_severity,
+            strict=strict_runtime_safety,
+            logger=logger,
+        )
         if backend == "smolagents":
             from agentltl.integrations.smolagents.backend import SmolAgentsAgentWithConstraints
             self._impl = SmolAgentsAgentWithConstraints(
@@ -269,6 +281,7 @@ class AgentWithConstraints:
                 max_steps=max_steps,
                 model_seed=model_seed,
                 model_instance=model_instance,
+                _skip_runtime_safety_check=True,
             )
         elif backend == "langchain":
             from agentltl.integrations.langchain.backend import LangChainConstrainedBackend
@@ -285,6 +298,7 @@ class AgentWithConstraints:
                 model_instance=model_instance,
                 max_steps=max_steps,
                 system_prompt=system_prompt,
+                _skip_runtime_safety_check=True,
             )
         else:
             raise ValueError(

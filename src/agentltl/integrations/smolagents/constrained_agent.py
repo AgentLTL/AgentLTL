@@ -56,6 +56,7 @@ from agentltl.enforcement import (
     ConstraintViolation,
     ConstraintViolationError as _BaseConstraintViolationError,
 )
+from agentltl.runtime_safety import check_runtime_safety_or_warn
 
 logger = logging.getLogger(__name__)
 
@@ -179,8 +180,18 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
         planning_interval: int | None = None,
         stream_outputs: bool = False,
         max_tool_threads: int | None = None,
+        strict_runtime_safety: bool = False,
+        _skip_runtime_safety_check: bool = False,
         **kwargs,
     ):
+        if not _skip_runtime_safety_check:
+            check_runtime_safety_or_warn(
+                constraints or [],
+                constraint_severities,
+                default_severity,
+                strict=strict_runtime_safety,
+                logger=logger,
+            )
         super().__init__(
             tools=tools,
             model=model,

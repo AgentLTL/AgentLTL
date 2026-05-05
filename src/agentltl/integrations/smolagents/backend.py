@@ -940,6 +940,8 @@ class SmolAgentsAgentWithConstraints(SmolAgentsAgent):
         max_steps: int = 10,
         model_seed: Optional[int] = None,
         model_instance: Optional[Any] = None,
+        strict_runtime_safety: bool = False,
+        _skip_runtime_safety_check: bool = False,
     ) -> None:
         mcp_clients, mcp_tools = _connect_mcp_servers(mcp_servers or {})
         all_tools: List[Tool] = mcp_tools + list(tools or [])
@@ -970,6 +972,8 @@ class SmolAgentsAgentWithConstraints(SmolAgentsAgent):
             soft_block_mode=soft_block_mode,
             max_consecutive_soft_attempts=max_consecutive_soft_attempts,
             max_steps=max_steps,
+            strict_runtime_safety=strict_runtime_safety,
+            _skip_runtime_safety_check=_skip_runtime_safety_check,
         )
 
     def run(

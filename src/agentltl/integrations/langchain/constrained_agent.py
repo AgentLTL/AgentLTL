@@ -35,6 +35,7 @@ from agentltl.enforcement import (
     ConstraintViolationError,
     SoftBlockMode,
 )
+from agentltl.runtime_safety import check_runtime_safety_or_warn
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +80,17 @@ class ConstraintEnforcementMiddleware:
         max_soft_attempts: int = 3,
         soft_block_mode: str = "cumulative",
         max_consecutive_soft_attempts: Optional[int] = None,
+        strict_runtime_safety: bool = False,
+        _skip_runtime_safety_check: bool = False,
     ) -> None:
+        if not _skip_runtime_safety_check:
+            check_runtime_safety_or_warn(
+                constraints or [],
+                constraint_severities,
+                default_severity,
+                strict=strict_runtime_safety,
+                logger=logger,
+            )
         self._constraints: List[Any] = list(constraints or [])
         self._severities: Dict[str, ConstraintSeverity] = dict(constraint_severities or {})
         self._default_severity = default_severity

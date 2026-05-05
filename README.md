@@ -497,6 +497,155 @@ and threshold, instructing the agent to take a fundamentally different approach.
 
 ---
 
+## Runtime-safety classification
+
+Some FOLTL formulas express *unbounded liveness*: their violation cannot be
+detected at any finite trace prefix because the satisfying step could always
+arrive later.  `Eventually(Called("done"))` is the canonical example — at any
+mid-run position the agent might still call `done` on the next step, so the
+constraint is not yet refuted.  Pairing such a formula with `HARD_STOP`
+produces spurious terminations: the agent gets killed for not having
+satisfied a constraint that it might have satisfied later.
+
+AgentLTL detects these mismatches statically.  When you build any of the
+constrained-agent classes, every constraint is classified as one of:
+
+- **`SAFE`**       — a violation is detectable at some finite prefix
+  (safety properties, bounded temporal properties, upper-bound counts).
+- **`UNSAFE`**     — cannot be falsified at any finite prefix.  Pairing
+  with `HARD_STOP` or `SOFT_BLOCK` will warn at registration time.
+- **`AMBIGUOUS`**  — the classifier cannot decide.  User-authored
+  `Predicate`s land here by default; the framework defers to the user.
+
+### Operator classification
+
+| Operator                                    | Default classification | Notes |
+|---------------------------------------------|------------------------|-------|
+| `Called(tool)`                              | UNSAFE                 | Witness can arrive later. |
+| `CalledNTimes(tool, n, "<=" / "<")`         | SAFE                   | Upper bounds: exceeding is permanent. |
+| `CalledNTimes(tool, n, ">=" / ">" / "==")`  | UNSAFE                 | Counts can grow / equality breakable. |
+| `CalledNTimes(tool, 0, "==" / ">=")`        | SAFE                   | Forbidden-tool form: any call permanently violates `==`; `>=` is vacuously true. |
+| `Before(a, b)` / `After(a, b)`              | UNSAFE                 | Order undetermined until `b` appears. |
+| `AllBefore(tools, target)`                  | SAFE                   | Missing-tool-at-gate is permanent. |
+| `BranchCalled(correct, wrong)`              | SAFE                   | Wrong branch is a permanent violation. |
+| `CalledWith(...)` / `CalledWithResult(...)` | UNSAFE                 | Match could occur later. |
+| `CalledInOrder(tools)`                      | UNSAFE                 | Subsequence may complete later. |
+| `InstanceBefore(a, n, b, m)`                | UNSAFE                 | Bounded only when both counts saturate. |
+| `WithinSteps(a, b, n)`                      | SAFE                   | Canonical bounded liveness. |
+| `Predicate(fn, desc)`                       | AMBIGUOUS              | Pass `runtime_safe=True/False` to override. |
+| `Globally(phi)`                             | SAFE                   | `G` is the canonical safety operator. |
+| `Eventually(phi)`                           | UNSAFE                 | Canonical unbounded liveness. |
+| `Next(phi)`                                 | inherits `phi`         | One-step bounded. |
+| `Until(phi, psi)`                           | UNSAFE                 | Right side can come arbitrarily late. |
+| `WeakUntil(phi, psi)`                       | inherits `phi`         | Allows `phi` forever; refutable iff `phi` SAFE. |
+| `Release(phi, psi)`                         | inherits `psi`         | `psi` must hold up to release. |
+| `AtPosition(index, phi)`                    | inherits `phi`         | Bounded position. |
+| `Not(phi)`                                  | flips SAFE↔UNSAFE      | AMBIGUOUS preserved. |
+| `And(phi, psi)`                             | SAFE if either is SAFE | Conjunction fails when either fails. |
+| `Or(phi, psi)`                              | SAFE iff both are SAFE | Disjunction fails only when both fail. |
+| `Implies(phi, psi)`                         | classified as `Or(Not(phi), psi)` | Standard rewrite. |
+| `ForAll(var, domain, body)`                 | inherits `body`        | One failing binding refutes the whole. |
+| `Exists(var, domain, body)`                 | UNSAFE                 | Witness binding may appear later. |
+
+### `strict_runtime_safety`
+
+By default each mismatch produces a `logger.warning` and the agent is
+constructed normally.  Pass `strict_runtime_safety=True` to
+`AgentWithConstraints`, `ToolCallingAgentWithConstraints`, or
+`ConstraintEnforcementMiddleware` to turn warnings into a `ValueError`
+at construction time:
+
+```python
+from agentltl import (
+    AgentWithConstraints,
+    Constraint,
+    Eventually,
+    Called,
+    ConstraintSeverity,
+)
+
+agent = AgentWithConstraints(
+    constraints=[Constraint("finish", Eventually(Called("done")))],
+    constraint_severities={"finish": ConstraintSeverity.HARD_STOP},
+    strict_runtime_safety=True,    # raises ValueError instead of warning
+)
+```
+
+The framework never silently downgrades severities and never silently
+treats unknown AST nodes as safe.
+
+### `Predicate(..., runtime_safe=...)`
+
+User-authored predicates default to `AMBIGUOUS` (the framework defers to
+you).  Set the kwarg explicitly when you know the answer:
+
+```python
+from agentltl import Predicate
+
+# Declared safe → SAFE, no warnings under any severity.
+my_invariant = Predicate(lambda t, p: ..., "invariant", runtime_safe=True)
+
+# Declared liveness → UNSAFE, warns / raises with HARD_STOP / SOFT_BLOCK.
+my_liveness = Predicate(lambda t, p: ..., "liveness", runtime_safe=False)
+```
+
+### Worked example
+
+```python
+from agentltl import (
+    AgentWithConstraints, Constraint, Eventually, Called, WithinSteps,
+    ConstraintSeverity,
+)
+
+# Bad: HARD_STOP on unbounded liveness.
+agent = AgentWithConstraints(
+    constraints=[Constraint("finish", Eventually(Called("done")))],
+    constraint_severities={"finish": ConstraintSeverity.HARD_STOP},
+)
+# WARNING agentltl.agents: Runtime-safety mismatch: constraint 'finish'
+# (Eventually(operand=Called(tool='done'))) classified UNSAFE but assigned
+# severity HARD_STOP. Either change the severity to TOLERATE, or rewrite
+# as a bounded property using WithinSteps(tool_a, tool_b, n).
+
+# Good: bounded rewrite.
+agent = AgentWithConstraints(
+    constraints=[Constraint("finish", WithinSteps("plan", "done", 5))],
+    constraint_severities={"finish": ConstraintSeverity.HARD_STOP},
+)
+# No warning — WithinSteps is SAFE.
+```
+
+For a forbidden ordering, prefer `Not(Before(b, a))` ("a must precede b")
+or `BranchCalled(correct, wrong)` over raw `Before(a, b)` when you want
+runtime blocking — the rewrites are SAFE while `Before` itself is UNSAFE.
+
+### Inspecting classifications offline
+
+```python
+from agentltl import classify_constraints
+
+reports = classify_constraints(
+    constraints,
+    constraint_severities,           # optional
+    default_severity=ConstraintSeverity.HARD_STOP,
+)
+for r in reports:
+    print(r.constraint_name, r.classification, r.compatible)
+    if not r.compatible:
+        print("  →", r.message)
+```
+
+Each `ClassificationReport` exposes `constraint_name`, `formula_repr`,
+`classification` (`RuntimeSafety`), `assigned_severity`, `compatible`,
+and `message`.
+
+Constraints with `applies_to_final_answer=True` are skipped by the
+registration-time hook (they run only at the end of the agent's run and
+cannot cause spurious mid-run terminations) but still appear in
+`classify_constraints` reports for inspection.
+
+---
+
 ## Examples
 
 | Example | Description |

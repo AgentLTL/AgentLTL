@@ -114,6 +114,13 @@ from .enforcement import (
     ConstraintViolationError,
 )
 
+# ── Static runtime-safety classification ─────────────────────────────────────
+from .runtime_safety import (
+    RuntimeSafety,
+    ClassificationReport,
+    classify_constraints,
+)
+
 # ── Backend-agnostic agent wrappers ───────────────────────────────────────────
 from .agents import (
     Agent,
@@ -147,6 +154,8 @@ __all__ = [
     # Enforcement types
     "ConstraintSeverity", "SoftBlockMode",
     "ConstraintViolation", "ConstraintViolationError",
+    # Runtime-safety classification
+    "RuntimeSafety", "ClassificationReport", "classify_constraints",
     # Agent wrappers
     "Agent", "AgentWithAdditionalTools",
     "AgentWithSubAgents", "AgentWithConstraints",

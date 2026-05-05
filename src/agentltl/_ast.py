@@ -386,11 +386,20 @@ class Predicate(Formula):
     *fn* receives ``(trace: Trace, position: int)`` and must return ``bool``.
     *description* is a human-readable label used in reports and ``__str__``.
 
+    *runtime_safe* is consulted by the static runtime-safety classifier in
+    :mod:`agentltl.runtime_safety`.  Set it to ``True`` to declare that
+    a violation of *fn* is detectable at any finite prefix (a safety
+    property) or ``False`` to declare that the property is unbounded
+    liveness.  ``None`` (the default) means the framework defers to the
+    user; the classifier reports ``AMBIGUOUS`` and the registration-time
+    hook stays silent.
+
     Because callables are not hashable in general, equality falls back to
     identity comparison.
     """
     fn: Callable  # (Trace, int) -> bool
     description: str = "predicate"
+    runtime_safe: Optional[bool] = None
 
     def __hash__(self) -> int:
         return id(self.fn)
@@ -581,7 +590,11 @@ def substitute(formula: Formula, bindings: Dict[str, Any]) -> Formula:
         original_fn = formula.fn
         def wrapped_fn(trace, position, _b=captured_bindings, _fn=original_fn):
             return _fn(trace, position, _b)
-        return Predicate(fn=wrapped_fn, description=formula.description)
+        return Predicate(
+            fn=wrapped_fn,
+            description=formula.description,
+            runtime_safe=formula.runtime_safe,
+        )
 
     if isinstance(formula, AtPosition):
         return AtPosition(index=formula.index, operand=substitute(formula.operand, bindings))

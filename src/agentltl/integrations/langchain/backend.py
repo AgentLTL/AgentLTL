@@ -231,6 +231,8 @@ class LangChainConstrainedBackend:
         max_steps: int = 10,
         system_prompt: Optional[str] = None,
         mcp_servers: Optional[Dict[str, Any]] = None,
+        strict_runtime_safety: bool = False,
+        _skip_runtime_safety_check: bool = False,
         **_ignored: Any,
     ) -> None:
         if mcp_servers:
@@ -247,6 +249,8 @@ class LangChainConstrainedBackend:
             max_soft_attempts=max_soft_attempts,
             soft_block_mode=soft_block_mode,
             max_consecutive_soft_attempts=max_consecutive_soft_attempts,
+            strict_runtime_safety=strict_runtime_safety,
+            _skip_runtime_safety_check=_skip_runtime_safety_check,
         )
 
         model_obj = model_instance if model_instance is not None else _resolve_lc_model(model)
