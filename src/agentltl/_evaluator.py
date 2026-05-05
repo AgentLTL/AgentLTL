@@ -159,16 +159,16 @@ class LTLEvaluator:
             return self._eval_all_before(formula, trace, partial_trace=partial_trace)
 
         if isinstance(formula, BranchCalled):
-            return self._eval_branch_called(formula, trace)
+            return self._eval_branch_called(formula, trace, partial_trace=partial_trace)
 
         if isinstance(formula, CalledWithResult):
             return self._eval_called_with_result(formula, trace)
 
         if isinstance(formula, InstanceBefore):
-            return self._eval_instance_before(formula, trace)
+            return self._eval_instance_before(formula, trace, partial_trace=partial_trace)
 
         if isinstance(formula, CalledInOrder):
-            return self._eval_called_in_order(formula, trace)
+            return self._eval_called_in_order(formula, trace, partial_trace=partial_trace)
 
         if isinstance(formula, WithinSteps):
             return self._eval_within_steps(formula, trace)
@@ -332,10 +332,19 @@ class LTLEvaluator:
             )
         return EvalResult(False, f'Gate violation for "{f.target}": {"; ".join(missing_or_late)}.', f)
 
-    def _eval_branch_called(self, f: BranchCalled, trace: Trace) -> EvalResult:
+    def _eval_branch_called(self, f: BranchCalled, trace: Trace, *, partial_trace: bool = False) -> EvalResult:
         correct_idx = trace.first_index(f.correct_tool)
         wrong_idx = trace.first_index(f.wrong_tool) if f.wrong_tool else -1
         ctx = f" [{f.context}]" if f.context else ""
+
+        # During speculative pre-execution checks, branch constraints should
+        # not fail before either branch candidate is actually attempted.
+        if partial_trace and correct_idx == -1 and wrong_idx == -1:
+            return EvalResult(
+                True,
+                f'Branch not reached yet for "{f.correct_tool}"{ctx}; deferred in partial trace.',
+                f,
+            )
 
         if correct_idx != -1 and wrong_idx == -1:
             return EvalResult(True, f'"{f.correct_tool}" correctly called (call #{correct_idx + 1}){ctx}.', f)
@@ -391,11 +400,20 @@ class LTLEvaluator:
             return all(actual.get(k) == v for k, v in expected.items())
         return actual == expected
 
-    def _eval_instance_before(self, f: InstanceBefore, trace: Trace) -> EvalResult:
+    def _eval_instance_before(self, f: InstanceBefore, trace: Trace, *, partial_trace: bool = False) -> EvalResult:
         a_idx = trace.nth_index(f.tool_a, f.n)
         b_idx = trace.nth_index(f.tool_b, f.m)
         a_count = trace.count(f.tool_a)
         b_count = trace.count(f.tool_b)
+
+        # In growing traces, defer this check until the target occurrence exists.
+        if partial_trace and b_idx == -1:
+            return EvalResult(
+                True,
+                f'Deferred: waiting for "{f.tool_b}" occurrence #{f.m} before checking InstanceBefore.',
+                f,
+            )
+
         if a_idx == -1:
             return EvalResult(False, f'"{f.tool_a}" has only {a_count} occurrence(s); need at least {f.n}.', f)
         if b_idx == -1:
@@ -412,15 +430,34 @@ class LTLEvaluator:
             f,
         )
 
-    def _eval_called_in_order(self, f: CalledInOrder, trace: Trace) -> EvalResult:
+    def _eval_called_in_order(self, f: CalledInOrder, trace: Trace, *, partial_trace: bool = False) -> EvalResult:
         if not f.tools:
             return EvalResult(True, "CalledInOrder: empty sequence — vacuously true.", f)
+
         ptr = 0
         for c in trace.calls:
-            if c.name == f.tools[ptr]:
+            if ptr < len(f.tools) and c.name == f.tools[ptr]:
                 ptr += 1
                 if ptr == len(f.tools):
                     return EvalResult(True, f"Sequence {list(f.tools)} found as subsequence in trace.", f)
+                continue
+
+            # In partial mode, fail fast only when a later expected tool appears
+            # before the next expected one (true order violation). Otherwise defer.
+            if partial_trace and ptr < len(f.tools) and c.name in f.tools[ptr + 1:]:
+                return EvalResult(
+                    False,
+                    f'Order violation in partial trace: saw "{c.name}" before expected "{f.tools[ptr]}".',
+                    f,
+                )
+
+        if partial_trace:
+            return EvalResult(
+                True,
+                f'Deferred: prefix progress {ptr}/{len(f.tools)} for CalledInOrder in partial trace.',
+                f,
+            )
+
         found = list(f.tools[:ptr])
         missing_from = f.tools[ptr]
         return EvalResult(

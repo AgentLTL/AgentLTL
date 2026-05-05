@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Generator, List, Optional, Sequence
 
@@ -57,6 +58,8 @@ from agentltl.enforcement import (
 )
 
 logger = logging.getLogger(__name__)
+
+_STEP_INDEXED_CONSTRAINT_RE = re.compile(r"^L[0-9]+_step_(\d+)_")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -262,6 +265,15 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
 
         violations: List[ConstraintViolation] = []
         for cr in result.get("constraints", []):
+            # Defer future step-indexed constraints (e.g. L1_step_4_*, L2_step_7_*).
+            # In pre-execution checking for step N, only constraints up to step N
+            # should be enforceable; future checks must not block current action.
+            m = _STEP_INDEXED_CONSTRAINT_RE.match(cr.get("name", ""))
+            if m:
+                expected_step = int(m.group(1))
+                if expected_step > step_number:
+                    continue
+
             if not cr["passed"]:
                 severity = self._severity_for(cr["name"])
                 violations.append(ConstraintViolation(

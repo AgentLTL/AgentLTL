@@ -148,7 +148,7 @@ class ConstraintViolationError(Exception):
                 f"Detail: {detail}\n"
                 f"Do NOT attempt this tool call. Choose a different action."
             )
-        super().__init__(msg)
+        Exception.__init__(self, msg)
 
     def dict(self) -> dict:
         """Return a JSON-serialisable dict of all structured fields."""
