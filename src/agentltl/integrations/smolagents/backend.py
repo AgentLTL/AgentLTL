@@ -96,6 +96,14 @@ def _create_model(
         "token": resolved_api_key,
         "provider": resolved_provider,
     }
+    # Without an explicit timeout the underlying httpx client can hang
+    # indefinitely if the provider drops the connection mid-stream — we've
+    # observed this on Together. Default 180s; tune via HF_INFERENCE_TIMEOUT.
+    timeout_raw = os.environ.get("HF_INFERENCE_TIMEOUT")
+    try:
+        model_kwargs["timeout"] = float(timeout_raw) if timeout_raw else 180.0
+    except ValueError:
+        model_kwargs["timeout"] = 180.0
     bill_to_org = os.environ.get("HF_BILL_TO")
     if bill_to_org:
         model_kwargs["bill_to"] = bill_to_org

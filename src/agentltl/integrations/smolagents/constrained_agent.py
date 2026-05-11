@@ -10,6 +10,9 @@ constraint's severity the agent either:
 * **HARD_STOP** – aborts the run immediately (the tool call is never executed).
 * **SOFT_BLOCK** – blocks the call, returns a constraint-violation observation to
   the model so it can self-correct, and continues the run.
+* **BLOCK_AND_WARN** – blocks the call and returns a warning observation. If the
+  model's *next* tool call is byte-identical to the call that was just blocked,
+  the override fires and the call is executed. Never escalates to HARD_STOP.
 * **TOLERATE** – logs a warning and continues execution.
 
 The ``final_answer`` tool is always exempt from constraint checking because by the
@@ -113,7 +116,8 @@ class ConstraintViolationError(_BaseConstraintViolationError, AgentError):
 
 class _SoftBlockSignal(Exception):
     """Internal signal raised inside process_single_tool_call_constrained when a
-    SOFT_BLOCK constraint fires.  Caught by the outer generator to yield feedback."""
+    SOFT_BLOCK or BLOCK_AND_WARN constraint fires. Caught by the outer generator
+    to yield feedback. The ``mode`` field selects the feedback wording."""
 
     def __init__(
         self,
@@ -122,12 +126,14 @@ class _SoftBlockSignal(Exception):
         count: int,
         consec: int = 0,
         threshold_str: str = "",
+        mode: str = "soft_block",
     ):
         self.tool_call = tool_call
         self.violation = violation
         self.count = count
         self.consec = consec
         self.threshold_str = threshold_str
+        self.mode = mode
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -228,6 +234,11 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
         self._soft_block_counts: Dict[str, int] = {}
         self._consecutive_soft_block_counts: Dict[str, int] = {}
         self._soft_blocked_calls: List[Dict[str, Any]] = []
+        # BLOCK_AND_WARN state
+        self._last_blocked_call: Optional[Dict[str, Any]] = None
+        self._block_and_warn_overrides: List[Dict[str, Any]] = []
+        self._block_and_warn_counts: Dict[str, int] = {}
+        self._current_turn_id: int = 0
 
     def _reset_constraint_state(self):
         """Reset per-run mutable state.  Called at the start of each ``run``."""
@@ -240,6 +251,26 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
         self._soft_block_counts = {}
         self._consecutive_soft_block_counts = {}
         self._soft_blocked_calls = []
+        self._last_blocked_call = None
+        self._block_and_warn_overrides = []
+        self._block_and_warn_counts = {}
+        self._current_turn_id = 0
+
+    @staticmethod
+    def _canonical_args(args: Any) -> Any:
+        """Recursively canonicalise tool arguments for byte-identical comparison.
+
+        Sorts dict keys; recurses into lists/tuples; leaves scalars alone.
+        Used for the BLOCK_AND_WARN insistence-pointer equality check.
+        """
+        if isinstance(args, dict):
+            return {
+                k: ToolCallingAgentWithConstraints._canonical_args(args[k])
+                for k in sorted(args.keys())
+            }
+        if isinstance(args, (list, tuple)):
+            return [ToolCallingAgentWithConstraints._canonical_args(v) for v in args]
+        return args
 
     def _severity_for(self, constraint_name: str) -> ConstraintSeverity:
         return self._active_severities.get(constraint_name, self._default_severity)
@@ -339,6 +370,11 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
             yield from super().process_tool_calls(chat_message, memory_step)
             return
 
+        # New LLM generation — bump turn id so BLOCK_AND_WARN insistence-overrides
+        # set in earlier turns become eligible to fire in this turn. Parallel duplicates
+        # within the same turn fail the (set_in_turn < current_turn_id) check.
+        self._current_turn_id += 1
+
         parallel_calls: dict[str, ToolCall] = {}
         assert chat_message.tool_calls is not None
         for chat_tool_call in chat_message.tool_calls:
@@ -354,6 +390,45 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
             tool_name = tool_call.name
             tool_arguments = tool_call.arguments or {}
 
+            # BLOCK_AND_WARN insistence override:
+            # if the model is re-issuing the byte-identical call that was just
+            # blocked (in a *later* turn — parallel duplicates within the same
+            # turn don't qualify), let it through without re-evaluating
+            # constraints (otherwise BLOCK_AND_WARN would simply re-fire).
+            is_insistence_override = False
+            if self._last_blocked_call is not None:
+                canonical = self._canonical_args(tool_arguments)
+                if (
+                    self._last_blocked_call["tool_name"] == tool_name
+                    and self._last_blocked_call["tool_args_canonical"] == canonical
+                    and self._last_blocked_call["set_in_turn"] < self._current_turn_id
+                ):
+                    is_insistence_override = True
+                    step_num_override = getattr(memory_step, "step_number", 0)
+                    self._block_and_warn_overrides.append({
+                        "step": step_num_override,
+                        "tool_name": tool_name,
+                        "tool_args": tool_arguments if isinstance(tool_arguments, dict) else {},
+                        "constraint_name": self._last_blocked_call["constraint_name"],
+                        "blocked_at_step": self._last_blocked_call["step_number"],
+                    })
+                    # Mark the matching prior block record as overridden
+                    for entry in reversed(self._soft_blocked_calls):
+                        if (
+                            entry.get("mode") == "block_and_warn"
+                            and entry.get("tool_name") == tool_name
+                            and entry.get("constraint") == self._last_blocked_call["constraint_name"]
+                            and not entry.get("overridden_next_step")
+                        ):
+                            entry["overridden_next_step"] = True
+                            break
+                    logger.info(
+                        "BLOCK_AND_WARN override: model insisted on '%s' "
+                        "(constraint '%s'). Executing.",
+                        tool_name, self._last_blocked_call["constraint_name"],
+                    )
+                    self._last_blocked_call = None
+
             # final_answer is normally exempt from constraint checking.
             # Constraints with applies_to_final_answer=True opt in to being
             # checked before the Finish action (required for kappa_ground
@@ -362,8 +437,10 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
                 c for c in self._active_constraints
                 if getattr(c, "applies_to_final_answer", False)
             ]
-            _should_check = self._active_constraints and (
-                tool_name != "final_answer" or _fa_constraints
+            _should_check = (
+                not is_insistence_override
+                and self._active_constraints
+                and (tool_name != "final_answer" or _fa_constraints)
             )
             _constraints_for_check = (
                 _fa_constraints if tool_name == "final_answer" else self._active_constraints
@@ -485,12 +562,55 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
                             count=count,
                             consec=consec,
                             threshold_str=threshold_str,
+                            mode="soft_block",
+                        )
+                    elif v.severity == ConstraintSeverity.BLOCK_AND_WARN.value:
+                        canonical = self._canonical_args(tool_arguments)
+                        self._block_and_warn_counts[v.constraint_name] = (
+                            self._block_and_warn_counts.get(v.constraint_name, 0) + 1
+                        )
+                        self._last_blocked_call = {
+                            "tool_name": tool_name,
+                            "tool_args_canonical": canonical,
+                            "constraint_name": v.constraint_name,
+                            "step_number": step_num,
+                            "set_in_turn": self._current_turn_id,
+                        }
+                        self._soft_blocked_calls.append({
+                            "step": step_num,
+                            "tool_name": tool_name,
+                            "tool_args": tool_arguments if isinstance(tool_arguments, dict) else {},
+                            "constraint": v.constraint_name,
+                            "detail": v.detail,
+                            "mode": "block_and_warn",
+                            "overridden_next_step": False,
+                        })
+                        logger.warning(
+                            "BLOCK_AND_WARN: constraint '%s' violated by tool '%s' (step %d). "
+                            "Model may override by repeating the exact call.",
+                            v.constraint_name, tool_name, step_num,
+                        )
+                        raise _SoftBlockSignal(
+                            tool_call=tool_call,
+                            violation=v,
+                            count=0,
+                            consec=0,
+                            threshold_str="",
+                            mode="block_and_warn",
                         )
                     else:
                         logger.warning(
                             "TOLERATE: constraint '%s' violated by tool '%s' (step %d). Continuing.",
                             v.constraint_name, tool_name, step_num,
                         )
+
+            # If we reach execution and this call wasn't the BLOCK_AND_WARN
+            # insistence-override target, the model effectively chose to do
+            # something else first — invalidate the pointer so we honour the
+            # "very next call must be identical" guarantee surfaced in the
+            # warning message.
+            if not is_insistence_override and self._last_blocked_call is not None:
+                self._last_blocked_call = None
 
             self.logger.log(
                 Panel(Text(f"Calling tool: '{tool_name}' with arguments: {tool_arguments}")),
@@ -538,14 +658,26 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
                 if self.soft_block_mode in (SoftBlockMode.CONSECUTIVE, SoftBlockMode.HYBRID):
                     self._consecutive_soft_block_counts.clear()
             except _SoftBlockSignal as sig:
-                feedback = (
-                    f"[CONSTRAINT VIOLATION — {sig.violation.constraint_name}]"
-                    f" ({sig.threshold_str})\n"
-                    f"{sig.violation.detail}\n"
-                    f"The tool call '{sig.tool_call.name}' was NOT executed. "
-                    f"Please reconsider and call a different tool or arguments "
-                    f"that satisfy the constraints."
-                )
+                if sig.mode == "block_and_warn":
+                    feedback = (
+                        f"[CONSTRAINT WARNING — {sig.violation.constraint_name}]\n"
+                        f"{sig.violation.detail}\n"
+                        f"The tool call '{sig.tool_call.name}' was NOT executed.\n"
+                        f"You may either: (a) call a DIFFERENT tool or arguments that "
+                        f"satisfies the constraint, or (b) if you have considered this "
+                        f"and still want to proceed, repeat this EXACT same tool call "
+                        f"(identical name and arguments) and it will be executed. "
+                        f"The override only applies if your very next call is byte-identical."
+                    )
+                else:
+                    feedback = (
+                        f"[CONSTRAINT VIOLATION — {sig.violation.constraint_name}]"
+                        f" ({sig.threshold_str})\n"
+                        f"{sig.violation.detail}\n"
+                        f"The tool call '{sig.tool_call.name}' was NOT executed. "
+                        f"Please reconsider and call a different tool or arguments "
+                        f"that satisfy the constraints."
+                    )
                 feedback_output = ToolOutput(
                     id=sig.tool_call.id,
                     output=feedback,
@@ -580,6 +712,9 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
             ``soft_block_counts``            – mapping constraint_name → # of soft blocks
             ``soft_block_mode``              – active escalation mode value string
             ``consecutive_soft_block_counts`` – mapping constraint_name → current consecutive count
+            ``block_and_warn_counts``        – mapping constraint_name → # of BLOCK_AND_WARN warnings issued
+            ``block_and_warn_overrides``     – list of insisted-through allow records
+            ``block_and_warn_override_count`` – ``len(block_and_warn_overrides)``
         """
         return {
             "status": self._run_status,
@@ -602,4 +737,7 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
             "soft_block_counts": dict(self._soft_block_counts),
             "soft_block_mode": self.soft_block_mode.value,
             "consecutive_soft_block_counts": dict(self._consecutive_soft_block_counts),
+            "block_and_warn_counts": dict(self._block_and_warn_counts),
+            "block_and_warn_overrides": list(self._block_and_warn_overrides),
+            "block_and_warn_override_count": len(self._block_and_warn_overrides),
         }

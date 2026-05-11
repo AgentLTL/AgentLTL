@@ -8,7 +8,7 @@ installing any optional extras.
 
 Types
 -----
-* :class:`ConstraintSeverity` – HARD_STOP / SOFT_BLOCK / TOLERATE
+* :class:`ConstraintSeverity` – HARD_STOP / SOFT_BLOCK / BLOCK_AND_WARN / TOLERATE
 * :class:`SoftBlockMode`      – cumulative / consecutive / hybrid
 * :class:`ConstraintViolation` – record of a single runtime violation
 * :class:`ConstraintViolationError` – exception raised when a constraint
@@ -36,6 +36,16 @@ class ConstraintSeverity(enum.Enum):
     """Block the call, return a constraint-violation observation to the model so it
     can self-correct, and continue the run.  Escalates to HARD_STOP after the
     configured soft-block threshold (see :class:`SoftBlockMode`)."""
+
+    BLOCK_AND_WARN = "BLOCK_AND_WARN"
+    """Block the call and return a *warning* observation to the model, but never
+    escalate to HARD_STOP. If the model's *next* tool call (in a subsequent
+    generation) is byte-identical to the call that was just blocked — same tool
+    name and same canonical arguments — the override fires and the call is
+    executed. Any non-identical retry is blocked-and-warned again, with the
+    insistence pointer updated to the new blocked call. Use this when the goal
+    is to surface a soft warning that the model can deliberately override by
+    repeating itself verbatim, rather than a hard or escalating block."""
 
     TOLERATE = "TOLERATE"
     """Log the violation and continue execution."""
