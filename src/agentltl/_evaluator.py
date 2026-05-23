@@ -269,6 +269,17 @@ class LTLEvaluator:
         if a_idx == -1:
             return EvalResult(False, f'"{f.a}" was never called (cannot precede "{f.b}").', f)
         if a_idx < b_idx:
+            a_call = trace.at(a_idx)
+            b_call = trace.at(b_idx)
+            a_step = a_call.raw.get("step") if a_call else None
+            b_step = b_call.raw.get("step") if b_call else None
+            if a_step is not None and b_step is not None and a_step >= b_step:
+                return EvalResult(
+                    False,
+                    f'"{f.a}" (call #{a_idx + 1}, step {a_step}) and "{f.b}" (call #{b_idx + 1}, step {b_step}) '
+                    f'are in the same agent step — step-boundary ordering requires strictly earlier steps.',
+                    f,
+                )
             return EvalResult(
                 True,
                 f'"{f.a}" (call #{a_idx + 1}) before "{f.b}" (call #{b_idx + 1}).',
@@ -419,6 +430,16 @@ class LTLEvaluator:
         if b_idx == -1:
             return EvalResult(False, f'"{f.tool_b}" has only {b_count} occurrence(s); need at least {f.m}.', f)
         if a_idx < b_idx:
+            a_call = trace.at(a_idx)
+            b_call = trace.at(b_idx)
+            a_step = a_call.raw.get("step") if a_call else None
+            b_step = b_call.raw.get("step") if b_call else None
+            if a_step is not None and b_step is not None and a_step >= b_step:
+                return EvalResult(
+                    False,
+                    f'"{f.tool_a}"[{f.n}] (call #{a_idx + 1}, step {a_step}) and "{f.tool_b}"[{f.m}] (call #{b_idx + 1}, step {b_step}) are in the same agent step — step-boundary ordering requires strictly earlier steps.',
+                    f,
+                )
             return EvalResult(
                 True,
                 f'"{f.tool_a}"[{f.n}] (call #{a_idx + 1}) before "{f.tool_b}"[{f.m}] (call #{b_idx + 1}).',
@@ -435,9 +456,18 @@ class LTLEvaluator:
             return EvalResult(True, "CalledInOrder: empty sequence — vacuously true.", f)
 
         ptr = 0
+        last_step: Optional[int] = None
         for c in trace.calls:
             if ptr < len(f.tools) and c.name == f.tools[ptr]:
+                c_step = c.raw.get("step")
+                # Step-boundary rule: consecutive elements of the sequence must
+                # be executed in strictly different agent steps.  Skip this
+                # occurrence if it shares a step with the previously matched
+                # tool (same-step calls are parallel, not sequential).
+                if last_step is not None and c_step is not None and c_step <= last_step:
+                    continue
                 ptr += 1
+                last_step = c_step
                 if ptr == len(f.tools):
                     return EvalResult(True, f"Sequence {list(f.tools)} found as subsequence in trace.", f)
                 continue
