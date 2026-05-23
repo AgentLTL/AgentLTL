@@ -71,22 +71,26 @@ print(result["compliance_label"])   # FULL
 ### Runtime enforcement — smolagents
 
 ```python
-from agentltl import Constraint, Before, AgentWithConstraints, ConstraintSeverity
+from agentltl import Constraint, Before, CalledNTimes, AgentWithConstraints, ConstraintSeverity
 
 constraints = [
     Constraint("fetch_before_process", Before("fetch_data", "process_data")),
+    Constraint("save_once",            CalledNTimes("save_results", 1, "=="), weight=0.5),
 ]
 
 agent = AgentWithConstraints(
-    tools=[FetchTool(), ProcessTool()],
+    tools=[FetchTool(), ProcessTool(), SaveTool()],
     constraints=constraints,
-    constraint_severities={"fetch_before_process": ConstraintSeverity.HARD_STOP},
+    constraint_severities={
+        "fetch_before_process": ConstraintSeverity.HARD_STOP,      # abort immediately
+        "save_once":            ConstraintSeverity.BLOCK_AND_WARN, # warn; allow if model insists
+    },
     max_soft_attempts=3,
     soft_block_mode="cumulative",
     backend="smolagents",   # default
 )
 
-result = agent.run("Fetch and then process the data.")
+result = agent.run("Fetch and then process the data, then save.")
 print(result["metrics"]["run_status"])           # "completed" or "stopped"
 print(result["metrics"]["constraint_violations"]) # list of violations
 ```
@@ -165,9 +169,9 @@ agent = AgentWithConstraints(
     tools=[FetchTool(), ProcessTool(), SaveTool()],
     constraints=constraints,
     constraint_severities={
-        "fetch_before_process": ConstraintSeverity.HARD_STOP,   # abort immediately
-        "process_before_save":  ConstraintSeverity.SOFT_BLOCK,  # block & let agent retry
-        "save_once":            ConstraintSeverity.TOLERATE,    # log only
+        "fetch_before_process": ConstraintSeverity.HARD_STOP,      # abort immediately
+        "process_before_save":  ConstraintSeverity.SOFT_BLOCK,     # block & let agent retry; escalates
+        "save_once":            ConstraintSeverity.BLOCK_AND_WARN, # warn; allow if model insists
     },
     max_soft_attempts=3,
     model=os.environ.get("MODEL", "Qwen/Qwen3-32B-Instruct"),
@@ -456,6 +460,7 @@ result = agent.run("do the task")
 |----------|-----------|
 | `HARD_STOP` | The offending tool call is **not executed**; the run stops immediately.  A `ConstraintViolationError` with `violation_type="HARD_STOP"` is recorded on the step. |
 | `SOFT_BLOCK` | The offending tool call is **not executed**; the agent receives a structured `ConstraintViolationError` observation and may self-correct.  Escalates to a hard-stop after a configurable number of blocked attempts (controlled by `SoftBlockMode` — see below). |
+| `BLOCK_AND_WARN` | The offending tool call is **not executed**; the agent receives a warning observation and may self-correct.  Unlike `SOFT_BLOCK`, it **never escalates** to `HARD_STOP`.  If the model's very next tool call (in the immediately following generation) is byte-identical — same tool name and same arguments — the call is treated as a deliberate override and is **executed**.  Any non-identical retry is blocked-and-warned again, with the insistence pointer updated to the new blocked call. |
 | `TOLERATE` | A warning is logged and execution continues. |
 
 Default severity is `HARD_STOP`.  Override per-constraint via `constraint_severities` dict or globally via `default_severity`.
