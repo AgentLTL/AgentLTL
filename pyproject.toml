@@ -35,6 +35,9 @@ langchain = [
     "langgraph>=0.2",
     "langchain-core>=0.3",
 ]
+native = [
+    "openai>=1.0",
+]
 dev = [
     "pytest>=7.0",
     "ruff>=0.4",

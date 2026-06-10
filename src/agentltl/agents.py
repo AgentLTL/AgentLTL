@@ -33,19 +33,21 @@ logger = logging.getLogger(__name__)
 class Agent:
     """Backend-agnostic base agent.
 
-    Currently delegates to the smolagents backend.  The ``backend`` parameter
-    is accepted for forward-compatibility but ``"smolagents"`` is the only
-    supported value.
+    Delegates to the ``smolagents`` backend (default) or the hand-coded
+    ``native`` backend (OpenAI-compatible chat-completions, incl. the HF router).
 
     Args:
         tools:          Tool instances.
         model:          Model name / ID.
         api_key:        API key.
-        provider:       HF Inference provider name.
+        provider:       HF Inference provider name (native: encoded as a
+                        ``model:provider`` suffix when talking to the HF router).
         max_steps:      Maximum agent steps.
         model_seed:     Optional seed for reproducible sampling.
-        model_instance: Pre-constructed model object.
-        backend:        Backend to use.  Only ``"smolagents"`` is supported.
+        model_instance: Pre-constructed model object (native: an ``openai.OpenAI``
+                        client).
+        base_url:       OpenAI-compatible base URL (native backend only).
+        backend:        ``"smolagents"`` (default) or ``"native"``.
     """
 
     def __init__(
@@ -57,22 +59,36 @@ class Agent:
         max_steps: int = 10,
         model_seed: Optional[int] = None,
         model_instance: Optional[Any] = None,
+        base_url: Optional[str] = None,
         backend: str = "smolagents",
     ) -> None:
-        if backend != "smolagents":
-            raise ValueError(
-                f"Agent only supports backend='smolagents'; got {backend!r}."
+        if backend == "smolagents":
+            from agentltl.integrations.smolagents.backend import SmolAgentsAgent
+            self._impl = SmolAgentsAgent(
+                tools=tools,
+                model=model,
+                api_key=api_key,
+                provider=provider,
+                max_steps=max_steps,
+                model_seed=model_seed,
+                model_instance=model_instance,
             )
-        from agentltl.integrations.smolagents.backend import SmolAgentsAgent
-        self._impl = SmolAgentsAgent(
-            tools=tools,
-            model=model,
-            api_key=api_key,
-            provider=provider,
-            max_steps=max_steps,
-            model_seed=model_seed,
-            model_instance=model_instance,
-        )
+        elif backend == "native":
+            from agentltl.integrations.native.backend import NativeOpenAIAgent
+            self._impl = NativeOpenAIAgent(
+                tools=tools,
+                model=model,
+                api_key=api_key,
+                provider=provider,
+                base_url=base_url,
+                max_steps=max_steps,
+                model_seed=model_seed,
+                model_instance=model_instance,
+            )
+        else:
+            raise ValueError(
+                f"Agent supports backend='smolagents' or 'native'; got {backend!r}."
+            )
 
     def run(self, task: str) -> Dict[str, Any]:
         return self._impl.run(task)
@@ -255,6 +271,7 @@ class AgentWithConstraints:
         max_steps: int = 10,
         system_prompt: Optional[str] = None,
         strict_runtime_safety: bool = False,
+        base_url: Optional[str] = None,
         backend: str = "smolagents",
     ) -> None:
         check_runtime_safety_or_warn(
@@ -300,10 +317,31 @@ class AgentWithConstraints:
                 system_prompt=system_prompt,
                 _skip_runtime_safety_check=True,
             )
+        elif backend == "native":
+            from agentltl.integrations.native.backend import NativeOpenAIAgent
+            self._impl = NativeOpenAIAgent(
+                tools=tools,
+                mcp_servers=mcp_servers,
+                constraints=constraints,
+                constraint_severities=constraint_severities,
+                default_severity=default_severity,
+                max_soft_attempts=max_soft_attempts,
+                soft_block_mode=soft_block_mode,
+                max_consecutive_soft_attempts=max_consecutive_soft_attempts,
+                model=model,
+                api_key=api_key,
+                provider=provider,
+                base_url=base_url,
+                max_steps=max_steps,
+                model_seed=model_seed,
+                model_instance=model_instance,
+                system_prompt=system_prompt,
+                _skip_runtime_safety_check=True,
+            )
         else:
             raise ValueError(
                 f"Unknown backend: {backend!r}. "
-                "Choose 'smolagents' or 'langchain'."
+                "Choose 'smolagents', 'langchain', or 'native'."
             )
 
     def run(
@@ -322,9 +360,126 @@ class AgentWithConstraints:
         return self._impl.get_constraint_status()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-turn agent — built on the native backend
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MultiTurnAgent:
+    """A multi-turn agent built on the hand-coded :class:`NativeOpenAIAgent`.
+
+    Unlike calling ``Agent.run()`` once per turn (which resets the conversation
+    each call), this keeps ONE persistent conversation across turns, so the model
+    SEES prior turns (continuity). It emits a single continuous trace (monotonic
+    ``step`` numbers, each tool call tagged with its ``turn``) and — when
+    constraints are supplied — enforces them at runtime *across the whole
+    session* (e.g. an ordering constraint spanning two turns).
+
+    Native backend only (the conversation-persistence primitives live there).
+
+    Example::
+
+        mt = MultiTurnAgent(tools=[...], model="Qwen/...", provider="novita",
+                            base_url="https://router.huggingface.co/v1")
+        result = mt.run(["turn 1 text", "turn 2 text", ...])
+        result["answers"]      # final answer per turn
+        result["per_turn"]     # [{answer, metrics, error}, ...] (per-turn trace)
+        result["metrics"]      # aggregate continuous trace for verify_trace
+    """
+
+    def __init__(
+        self,
+        tools: Optional[List[Any]] = None,
+        model: Optional[Any] = None,
+        api_key: Optional[str] = None,
+        provider: Optional[str] = None,
+        base_url: Optional[str] = None,
+        max_steps: int = 10,
+        model_seed: Optional[int] = None,
+        model_instance: Optional[Any] = None,
+        system_prompt: Optional[str] = None,
+        constraints: Optional[List[Any]] = None,
+        constraint_severities: Optional[Dict[str, ConstraintSeverity]] = None,
+        default_severity: ConstraintSeverity = ConstraintSeverity.HARD_STOP,
+        max_soft_attempts: int = 3,
+        soft_block_mode: str = "cumulative",
+        max_consecutive_soft_attempts: Optional[int] = None,
+        strict_runtime_safety: bool = False,
+        backend: str = "native",
+    ) -> None:
+        if backend != "native":
+            raise ValueError(
+                f"MultiTurnAgent only supports backend='native'; got {backend!r}."
+            )
+        check_runtime_safety_or_warn(
+            constraints or [],
+            constraint_severities,
+            default_severity,
+            strict=strict_runtime_safety,
+            logger=logger,
+        )
+        from agentltl.integrations.native.backend import NativeOpenAIAgent
+        self._impl = NativeOpenAIAgent(
+            tools=tools,
+            model=model,
+            api_key=api_key,
+            provider=provider,
+            base_url=base_url,
+            max_steps=max_steps,
+            model_seed=model_seed,
+            model_instance=model_instance,
+            system_prompt=system_prompt,
+            constraints=constraints,
+            constraint_severities=constraint_severities,
+            default_severity=default_severity,
+            max_soft_attempts=max_soft_attempts,
+            soft_block_mode=soft_block_mode,
+            max_consecutive_soft_attempts=max_consecutive_soft_attempts,
+            _skip_runtime_safety_check=True,
+        )
+        self.reset()
+
+    def reset(self) -> None:
+        """Start a fresh session (clears conversation, enforcer, and trace)."""
+        self._impl.reset()
+
+    def run_turn(self, task: str) -> Dict[str, Any]:
+        """Run one user turn against the persistent conversation. Returns
+        ``{"answer", "metrics", "error"}`` for that turn."""
+        return self._impl.run_turn(task)
+
+    def run(self, turns: List[str]) -> Dict[str, Any]:
+        """Run a list of user turns sequentially in one persistent session.
+
+        Returns ``{"answers", "per_turn", "metrics", "error"}`` where ``metrics``
+        is the aggregate continuous trace (suitable for ``verify_trace``) and
+        ``per_turn`` holds each turn's individual result.
+        """
+        self.reset()
+        per_turn: List[Dict[str, Any]] = []
+        answers: List[Optional[str]] = []
+        first_error: Optional[Any] = None
+        for task in turns:
+            res = self.run_turn(task)
+            per_turn.append(res)
+            answers.append(res.get("answer"))
+            if res.get("error") and first_error is None:
+                first_error = res["error"]
+                break  # a HARD_STOP / escalation aborts the session
+        return {
+            "answers": answers,
+            "per_turn": per_turn,
+            "metrics": self._impl.session_metrics(),
+            "error": first_error,
+        }
+
+    def get_constraint_status(self) -> Dict[str, Any]:
+        return self._impl.get_constraint_status()
+
+
 __all__ = [
     "Agent",
     "AgentWithAdditionalTools",
     "AgentWithSubAgents",
     "AgentWithConstraints",
+    "MultiTurnAgent",
 ]

@@ -127,6 +127,7 @@ from .agents import (
     AgentWithAdditionalTools,
     AgentWithSubAgents,
     AgentWithConstraints,
+    MultiTurnAgent,
 )
 
 __version__ = "0.1.0"
@@ -159,4 +160,5 @@ __all__ = [
     # Agent wrappers
     "Agent", "AgentWithAdditionalTools",
     "AgentWithSubAgents", "AgentWithConstraints",
+    "MultiTurnAgent",
 ]
