@@ -91,6 +91,7 @@ class NativeOpenAIAgent:
         api_key: Optional[str] = None,
         provider: Optional[str] = None,
         base_url: Optional[str] = None,
+        bill_to: Optional[str] = None,
         max_steps: int = 10,
         model_seed: Optional[int] = None,
         model_instance: Optional[Any] = None,
@@ -142,7 +143,18 @@ class NativeOpenAIAgent:
                     "Install with: pip install 'agentltl[native]' (or pip install openai)."
                 ) from e
             resolved_key = api_key or os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY")
-            self._client = OpenAI(base_url=self._base_url, api_key=resolved_key)
+            # Bill HF-router usage to an org via the X-HF-Bill-To header
+            # (mirrors huggingface_hub's `bill_to`). Without this, usage is billed
+            # to the personal account behind HF_TOKEN.
+            default_headers: Dict[str, str] = {}
+            resolved_bill_to = bill_to or os.getenv("HF_BILL_TO")
+            if resolved_bill_to and "huggingface.co" in self._base_url:
+                default_headers["X-HF-Bill-To"] = resolved_bill_to
+            self._client = OpenAI(
+                base_url=self._base_url,
+                api_key=resolved_key,
+                default_headers=default_headers or None,
+            )
 
         self._enforcer = ConstraintEnforcer(
             constraints=constraints,
@@ -226,14 +238,21 @@ class NativeOpenAIAgent:
                     answer = msg.content          # no tool call => final answer
                     break
 
+                # New LLM generation — advances the BLOCK_AND_WARN insistence
+                # pointer so a call blocked in a prior generation becomes
+                # eligible for override here (parallel duplicates in THIS
+                # generation don't qualify).
+                self._enforcer.begin_generation()
+
                 for tc in tool_calls:
                     name = tc.function.name
                     args = self._parse_args(tc.function.arguments)
                     # Runtime enforcement (no-op when there are no constraints).
                     decision = self._enforcer.check(name, args, step_no)
-                    if isinstance(decision, tuple) and decision[0] == "soft_block":
-                        # Blocked: feed the violation back as this call's tool result,
-                        # do NOT execute, and keep it OUT of the executed trace.
+                    if isinstance(decision, tuple) and decision[0] in ("soft_block", "block_and_warn"):
+                        # Blocked: feed the violation/warning back as this call's
+                        # tool result, do NOT execute, and keep it OUT of the
+                        # executed trace.
                         self._messages.append(
                             {"role": "tool", "tool_call_id": tc.id, "content": decision[1]}
                         )

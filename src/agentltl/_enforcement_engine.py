@@ -40,7 +40,8 @@ from .enforcement import (
 
 logger = logging.getLogger(__name__)
 
-# Return type of check(): either the literal "allow", or ("soft_block", feedback).
+# Return type of check(): the literal "allow", or ("soft_block", feedback), or
+# ("block_and_warn", feedback).
 Decision = Union[str, Tuple[str, str]]
 
 
@@ -91,6 +92,14 @@ class ConstraintEnforcer:
         self._constraint_checks: int = 0
         self._run_status: str = "completed"
         self._stopped_by: Optional[str] = None
+        # ── BLOCK_AND_WARN state ──
+        # Insistence pointer: the most recent BLOCK_AND_WARN-blocked call. The
+        # model may override it by re-issuing the byte-identical call in a LATER
+        # generation (see begin_generation / check).
+        self._block_and_warn_counts: Dict[str, int] = {}
+        self._block_and_warn_overrides: List[Dict[str, Any]] = []
+        self._last_blocked_call: Optional[Dict[str, Any]] = None
+        self._current_generation: int = 0
 
     def set_constraints(
         self,
@@ -105,6 +114,30 @@ class ConstraintEnforcer:
     def has_constraints(self) -> bool:
         return bool(self._constraints)
 
+    def begin_generation(self) -> None:
+        """Mark the start of a new LLM generation (one model completion).
+
+        Drives the BLOCK_AND_WARN insistence pointer: a call blocked in
+        generation *G* may be overridden only by a byte-identical re-issue in a
+        *later* generation, so parallel duplicates within the same completion do
+        NOT qualify as an override. The native backend calls this once per chat
+        completion, before iterating that completion's tool calls.
+        """
+        self._current_generation += 1
+
+    @staticmethod
+    def _canonical_args(args: Any) -> Any:
+        """Recursively canonicalise tool arguments for byte-identical comparison.
+
+        Sorts dict keys; recurses into lists/tuples; leaves scalars alone.
+        Used for the BLOCK_AND_WARN insistence-pointer equality check.
+        """
+        if isinstance(args, dict):
+            return {k: ConstraintEnforcer._canonical_args(args[k]) for k in sorted(args.keys())}
+        if isinstance(args, (list, tuple)):
+            return [ConstraintEnforcer._canonical_args(v) for v in args]
+        return args
+
     def check(self, tool_name: str, tool_args: Dict[str, Any], step_number: int) -> Decision:
         """Evaluate constraints against the prospective call.
 
@@ -112,6 +145,42 @@ class ConstraintEnforcer:
         if it must be blocked but the run continues. Raises
         :class:`ConstraintViolationError` on HARD_STOP or soft-block escalation.
         """
+        # BLOCK_AND_WARN insistence override: if the model is re-issuing the
+        # byte-identical call that was just blocked (in a LATER generation —
+        # parallel duplicates within the same generation don't qualify), let it
+        # through WITHOUT re-evaluating constraints (otherwise BLOCK_AND_WARN
+        # would simply re-fire).
+        if self._last_blocked_call is not None:
+            canonical = self._canonical_args(tool_args)
+            if (
+                self._last_blocked_call["tool_name"] == tool_name
+                and self._last_blocked_call["tool_args_canonical"] == canonical
+                and self._last_blocked_call["set_in_generation"] < self._current_generation
+            ):
+                name = self._last_blocked_call["constraint_name"]
+                self._block_and_warn_overrides.append({
+                    "step": step_number,
+                    "tool_name": tool_name,
+                    "tool_args": tool_args,
+                    "constraint_name": name,
+                    "blocked_at_step": self._last_blocked_call["step_number"],
+                })
+                for entry in reversed(self._soft_blocked_calls):
+                    if (
+                        entry.get("mode") == "block_and_warn"
+                        and entry.get("tool_name") == tool_name
+                        and entry.get("constraint_name") == name
+                        and not entry.get("overridden_next_step")
+                    ):
+                        entry["overridden_next_step"] = True
+                        break
+                logger.info(
+                    "[CONSTRAINT BLOCK_AND_WARN override] model insisted on '%s' "
+                    "(constraint '%s') — executing.", tool_name, name,
+                )
+                self._last_blocked_call = None
+                return "allow"
+
         violations = self._evaluate_constraints(tool_name, tool_args, step_number)
 
         for v in violations:
@@ -128,6 +197,10 @@ class ConstraintEnforcer:
                 # First soft-block found decides the outcome of this call.
                 return self._handle_soft_block(v, tool_name, tool_args, step_number)
 
+            elif severity == ConstraintSeverity.BLOCK_AND_WARN:
+                # First block-and-warn found decides the outcome of this call.
+                return self._handle_block_and_warn(v, tool_name, tool_args, step_number)
+
             elif severity == ConstraintSeverity.HARD_STOP:
                 self._run_status = "stopped"
                 self._stopped_by = v.constraint_name
@@ -143,6 +216,11 @@ class ConstraintEnforcer:
         # No blocking violation — allow. Reset consecutive counters on success.
         if self._soft_block_mode in (SoftBlockMode.CONSECUTIVE, SoftBlockMode.HYBRID):
             self._consecutive_soft_block_counts.clear()
+        # This allowed call was not the insistence-override target, so the model
+        # chose to do something else first — invalidate the pointer to honour the
+        # "the very next call must be identical" guarantee in the warning.
+        if self._last_blocked_call is not None:
+            self._last_blocked_call = None
         return "allow"
 
     def record_completed(
@@ -166,6 +244,9 @@ class ConstraintEnforcer:
             "soft_block_counts": dict(self._soft_block_counts),
             "soft_block_mode": self._soft_block_mode.value,
             "consecutive_soft_block_counts": dict(self._consecutive_soft_block_counts),
+            "block_and_warn_counts": dict(self._block_and_warn_counts),
+            "block_and_warn_overrides": list(self._block_and_warn_overrides),
+            "block_and_warn_override_count": len(self._block_and_warn_overrides),
         }
 
     # ── Internal ──────────────────────────────────────────────────────────────
@@ -268,6 +349,50 @@ class ConstraintEnforcer:
             name, tool_name, step_number, total, self._max_soft_attempts, v.detail,
         )
         return ("soft_block", feedback)
+
+    def _handle_block_and_warn(
+        self, v: ConstraintViolation, tool_name: str, tool_args: Dict[str, Any], step_number: int
+    ) -> Tuple[str, str]:
+        """Block the call and warn, but NEVER escalate. The model may override by
+        re-issuing the byte-identical call in a later generation (see check)."""
+        name = v.constraint_name
+        self._block_and_warn_counts[name] = self._block_and_warn_counts.get(name, 0) + 1
+        self._last_blocked_call = {
+            "tool_name": tool_name,
+            "tool_args_canonical": self._canonical_args(tool_args),
+            "constraint_name": name,
+            "step_number": step_number,
+            "set_in_generation": self._current_generation,
+        }
+        self._soft_blocked_calls.append(
+            {
+                "step": step_number,
+                "constraint_name": name,
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+                "detail": v.detail,
+                "mode": "block_and_warn",
+                "overridden_next_step": False,
+            }
+        )
+        self._constraint_violations.append(self._violation_to_dict(v))
+
+        feedback = (
+            f"[CONSTRAINT VIOLATION — BLOCK_AND_WARN]\n"
+            f"Constraint '{name}' was violated by tool call '{tool_name}'.\n"
+            f"The tool was NOT executed.\n"
+            f"Detail: {v.detail}\n"
+            f"This is a warning, not a hard block. If you are sure this call is "
+            f"necessary, you may override it by re-issuing the EXACT same call "
+            f"(same tool name and same arguments) as your very next action; "
+            f"otherwise choose a different action to comply with the constraint."
+        )
+        logger.warning(
+            "[CONSTRAINT BLOCK_AND_WARN] %s violated by '%s' at step %d: %s "
+            "(model may override by repeating the exact call).",
+            name, tool_name, step_number, v.detail,
+        )
+        return ("block_and_warn", feedback)
 
     @staticmethod
     def _violation_to_dict(v: ConstraintViolation) -> Dict[str, Any]:
