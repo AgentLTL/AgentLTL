@@ -5,7 +5,8 @@ runtime-safety.
 A FOLTL formula is *runtime-safe* iff a violation can be definitively
 detected at some finite trace prefix.  Pairing a runtime-unsafe formula
 (an unbounded liveness property such as ``Eventually(Called("done"))``)
-with a blocking severity (``HARD_STOP``, ``SOFT_BLOCK``) produces
+with a blocking severity (``HARD_STOP``, ``SOFT_BLOCK``,
+``PERSISTENT_BLOCK``) produces
 spurious terminations: the agent is killed for not having satisfied a
 property whose witness might still arrive on the next step.
 
@@ -324,6 +325,10 @@ def classify_runtime_safety(formula: Formula) -> _Classification:
 _BLOCKING_SEVERITIES = (
     ConstraintSeverity.HARD_STOP,
     ConstraintSeverity.SOFT_BLOCK,
+    # PERSISTENT_BLOCK permanently blocks the call with no override, so — unlike
+    # the overridable BLOCK_AND_WARN — it must not be paired with a constraint
+    # that cannot be safely evaluated at runtime.
+    ConstraintSeverity.PERSISTENT_BLOCK,
 )
 
 

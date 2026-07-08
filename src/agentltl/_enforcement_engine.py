@@ -41,7 +41,7 @@ from .enforcement import (
 logger = logging.getLogger(__name__)
 
 # Return type of check(): the literal "allow", or ("soft_block", feedback), or
-# ("block_and_warn", feedback).
+# ("block_and_warn", feedback), or ("persistent_block", feedback).
 Decision = Union[str, Tuple[str, str]]
 
 
@@ -100,6 +100,9 @@ class ConstraintEnforcer:
         self._block_and_warn_overrides: List[Dict[str, Any]] = []
         self._last_blocked_call: Optional[Dict[str, Any]] = None
         self._current_generation: int = 0
+        # ── PERSISTENT_BLOCK state ──
+        # Like BLOCK_AND_WARN but with no override: the call is blocked every time.
+        self._persistent_block_counts: Dict[str, int] = {}
 
     def set_constraints(
         self,
@@ -201,6 +204,10 @@ class ConstraintEnforcer:
                 # First block-and-warn found decides the outcome of this call.
                 return self._handle_block_and_warn(v, tool_name, tool_args, step_number)
 
+            elif severity == ConstraintSeverity.PERSISTENT_BLOCK:
+                # First persistent-block found decides the outcome of this call.
+                return self._handle_persistent_block(v, tool_name, tool_args, step_number)
+
             elif severity == ConstraintSeverity.HARD_STOP:
                 self._run_status = "stopped"
                 self._stopped_by = v.constraint_name
@@ -247,6 +254,7 @@ class ConstraintEnforcer:
             "block_and_warn_counts": dict(self._block_and_warn_counts),
             "block_and_warn_overrides": list(self._block_and_warn_overrides),
             "block_and_warn_override_count": len(self._block_and_warn_overrides),
+            "persistent_block_counts": dict(self._persistent_block_counts),
         }
 
     # ── Internal ──────────────────────────────────────────────────────────────
@@ -393,6 +401,42 @@ class ConstraintEnforcer:
             name, tool_name, step_number, v.detail,
         )
         return ("block_and_warn", feedback)
+
+    def _handle_persistent_block(
+        self, v: ConstraintViolation, tool_name: str, tool_args: Dict[str, Any], step_number: int
+    ) -> Tuple[str, str]:
+        """Block the call and warn, never escalate, and NEVER allow an override. Unlike
+        BLOCK_AND_WARN this sets no insistence pointer, so re-issuing the identical call
+        is blocked again every time."""
+        name = v.constraint_name
+        self._persistent_block_counts[name] = self._persistent_block_counts.get(name, 0) + 1
+        self._soft_blocked_calls.append(
+            {
+                "step": step_number,
+                "constraint_name": name,
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+                "detail": v.detail,
+                "mode": "persistent_block",
+            }
+        )
+        self._constraint_violations.append(self._violation_to_dict(v))
+
+        feedback = (
+            f"[CONSTRAINT VIOLATION — PERSISTENT_BLOCK]\n"
+            f"Constraint '{name}' was violated by tool call '{tool_name}'.\n"
+            f"The tool was NOT executed.\n"
+            f"Detail: {v.detail}\n"
+            f"This block cannot be overridden: repeating the exact same call will "
+            f"not execute it. You must choose a different action to comply with the "
+            f"constraint."
+        )
+        logger.warning(
+            "[CONSTRAINT PERSISTENT_BLOCK] %s violated by '%s' at step %d: %s "
+            "(block cannot be overridden).",
+            name, tool_name, step_number, v.detail,
+        )
+        return ("persistent_block", feedback)
 
     @staticmethod
     def _violation_to_dict(v: ConstraintViolation) -> Dict[str, Any]:

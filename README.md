@@ -2,7 +2,7 @@
 
 **FOLTL constraint verification for LLM agent traces.**
 
-AgentLTL provides a First-Order Linear Temporal Logic (FOLTL) engine for verifying that LLM agent tool-call traces comply with procedural constraints.  It supports both **post-hoc verification** (after a run completes) and **runtime enforcement** (pre-execution checking before each tool call, with `HARD_STOP`, `SOFT_BLOCK`, and `TOLERATE` severity modes).
+AgentLTL provides a First-Order Linear Temporal Logic (FOLTL) engine for verifying that LLM agent tool-call traces comply with procedural constraints.  It supports both **post-hoc verification** (after a run completes) and **runtime enforcement** (pre-execution checking before each tool call, with `HARD_STOP`, `SOFT_BLOCK`, `BLOCK_AND_WARN`, `PERSISTENT_BLOCK`, and `TOLERATE` severity modes).
 
 ---
 
@@ -170,8 +170,9 @@ agent = AgentWithConstraints(
     constraints=constraints,
     constraint_severities={
         "fetch_before_process": ConstraintSeverity.HARD_STOP,      # abort immediately
-        "process_before_save":  ConstraintSeverity.SOFT_BLOCK,     # block & let agent retry; escalates
-        "save_once":            ConstraintSeverity.BLOCK_AND_WARN, # warn; allow if model insists
+        "process_before_save":  ConstraintSeverity.SOFT_BLOCK,       # block & let agent retry; escalates
+        "save_once":            ConstraintSeverity.BLOCK_AND_WARN,   # warn; allow if model insists
+        "never_delete":         ConstraintSeverity.PERSISTENT_BLOCK, # warn; block every time, no override
     },
     max_soft_attempts=3,
     model=os.environ.get("MODEL", "Qwen/Qwen3-32B-Instruct"),
@@ -461,6 +462,7 @@ result = agent.run("do the task")
 | `HARD_STOP` | The offending tool call is **not executed**; the run stops immediately.  A `ConstraintViolationError` with `violation_type="HARD_STOP"` is recorded on the step. |
 | `SOFT_BLOCK` | The offending tool call is **not executed**; the agent receives a structured `ConstraintViolationError` observation and may self-correct.  Escalates to a hard-stop after a configurable number of blocked attempts (controlled by `SoftBlockMode` — see below). |
 | `BLOCK_AND_WARN` | The offending tool call is **not executed**; the agent receives a warning observation and may self-correct.  Unlike `SOFT_BLOCK`, it **never escalates** to `HARD_STOP`.  If the model's very next tool call (in the immediately following generation) is byte-identical — same tool name and same arguments — the call is treated as a deliberate override and is **executed**.  Any non-identical retry is blocked-and-warned again, with the insistence pointer updated to the new blocked call. |
+| `PERSISTENT_BLOCK` | The offending tool call is **not executed**; the agent receives a warning observation and may self-correct.  Like `BLOCK_AND_WARN`, it **never escalates** to `HARD_STOP` and the run continues — but the block **can never be overridden**: re-issuing the exact same call is blocked again every time.  Use this for a non-fatal but non-negotiable guardrail where the model must ultimately choose a compliant action.  Per-constraint block counts are surfaced as `persistent_block_counts` in the constraint status. |
 | `TOLERATE` | A warning is logged and execution continues. |
 
 Default severity is `HARD_STOP`.  Override per-constraint via `constraint_severities` dict or globally via `default_severity`.
@@ -518,7 +520,9 @@ constrained-agent classes, every constraint is classified as one of:
 - **`SAFE`**       — a violation is detectable at some finite prefix
   (safety properties, bounded temporal properties, upper-bound counts).
 - **`UNSAFE`**     — cannot be falsified at any finite prefix.  Pairing
-  with `HARD_STOP` or `SOFT_BLOCK` will warn at registration time.
+  with a blocking severity (`HARD_STOP`, `SOFT_BLOCK`, or `PERSISTENT_BLOCK`)
+  will warn at registration time.  (`BLOCK_AND_WARN` is exempt because the
+  model can always override it.)
 - **`AMBIGUOUS`**  — the classifier cannot decide.  User-authored
   `Predicate`s land here by default; the framework defers to the user.
 

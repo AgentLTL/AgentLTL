@@ -239,6 +239,8 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
         self._block_and_warn_overrides: List[Dict[str, Any]] = []
         self._block_and_warn_counts: Dict[str, int] = {}
         self._current_turn_id: int = 0
+        # PERSISTENT_BLOCK state (no override, so no insistence pointer)
+        self._persistent_block_counts: Dict[str, int] = {}
 
     def _reset_constraint_state(self):
         """Reset per-run mutable state.  Called at the start of each ``run``."""
@@ -255,6 +257,7 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
         self._block_and_warn_overrides = []
         self._block_and_warn_counts = {}
         self._current_turn_id = 0
+        self._persistent_block_counts = {}
 
     @staticmethod
     def _canonical_args(args: Any) -> Any:
@@ -598,6 +601,33 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
                             threshold_str="",
                             mode="block_and_warn",
                         )
+                    elif v.severity == ConstraintSeverity.PERSISTENT_BLOCK.value:
+                        # Like BLOCK_AND_WARN but with NO override: do not set
+                        # self._last_blocked_call, so repeating the call is blocked again.
+                        self._persistent_block_counts[v.constraint_name] = (
+                            self._persistent_block_counts.get(v.constraint_name, 0) + 1
+                        )
+                        self._soft_blocked_calls.append({
+                            "step": step_num,
+                            "tool_name": tool_name,
+                            "tool_args": tool_arguments if isinstance(tool_arguments, dict) else {},
+                            "constraint": v.constraint_name,
+                            "detail": v.detail,
+                            "mode": "persistent_block",
+                        })
+                        logger.warning(
+                            "PERSISTENT_BLOCK: constraint '%s' violated by tool '%s' (step %d). "
+                            "Block cannot be overridden.",
+                            v.constraint_name, tool_name, step_num,
+                        )
+                        raise _SoftBlockSignal(
+                            tool_call=tool_call,
+                            violation=v,
+                            count=0,
+                            consec=0,
+                            threshold_str="",
+                            mode="persistent_block",
+                        )
                     else:
                         logger.warning(
                             "TOLERATE: constraint '%s' violated by tool '%s' (step %d). Continuing.",
@@ -668,6 +698,15 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
                         f"and still want to proceed, repeat this EXACT same tool call "
                         f"(identical name and arguments) and it will be executed. "
                         f"The override only applies if your very next call is byte-identical."
+                    )
+                elif sig.mode == "persistent_block":
+                    feedback = (
+                        f"[CONSTRAINT WARNING — {sig.violation.constraint_name}]\n"
+                        f"{sig.violation.detail}\n"
+                        f"The tool call '{sig.tool_call.name}' was NOT executed.\n"
+                        f"This block cannot be overridden: repeating the exact same call "
+                        f"will not execute it. Call a DIFFERENT tool or arguments that "
+                        f"satisfies the constraint."
                     )
                 else:
                     feedback = (
@@ -740,4 +779,5 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
             "block_and_warn_counts": dict(self._block_and_warn_counts),
             "block_and_warn_overrides": list(self._block_and_warn_overrides),
             "block_and_warn_override_count": len(self._block_and_warn_overrides),
+            "persistent_block_counts": dict(self._persistent_block_counts),
         }

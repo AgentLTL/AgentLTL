@@ -8,7 +8,8 @@ installing any optional extras.
 
 Types
 -----
-* :class:`ConstraintSeverity` – HARD_STOP / SOFT_BLOCK / BLOCK_AND_WARN / TOLERATE
+* :class:`ConstraintSeverity` – HARD_STOP / SOFT_BLOCK / BLOCK_AND_WARN /
+  PERSISTENT_BLOCK / TOLERATE
 * :class:`SoftBlockMode`      – cumulative / consecutive / hybrid
 * :class:`ConstraintViolation` – record of a single runtime violation
 * :class:`ConstraintViolationError` – exception raised when a constraint
@@ -46,6 +47,12 @@ class ConstraintSeverity(enum.Enum):
     insistence pointer updated to the new blocked call. Use this when the goal
     is to surface a soft warning that the model can deliberately override by
     repeating itself verbatim, rather than a hard or escalating block."""
+
+    PERSISTENT_BLOCK = "PERSISTENT_BLOCK"
+    """Block the call and return a warning observation to the model, continue the run,
+    and never escalate to HARD_STOP — like BLOCK_AND_WARN, but the block can NEVER be
+    overridden. Re-issuing the same call is blocked again every time. Use this for a
+    non-fatal but non-negotiable guardrail: the model must choose a compliant action."""
 
     TOLERATE = "TOLERATE"
     """Log the violation and continue execution."""

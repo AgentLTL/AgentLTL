@@ -130,6 +130,7 @@ class ConstraintEnforcementMiddleware:
         self._run_status = "completed"
         self._stopped_by = None
         self._step_number = 0
+        self._persistent_block_counts: Dict[str, int] = {}
 
     def set_constraints(
         self,
@@ -185,6 +186,7 @@ class ConstraintEnforcementMiddleware:
             "soft_block_counts": dict(self._soft_block_counts),
             "soft_block_mode": self._soft_block_mode.value,
             "consecutive_soft_block_counts": dict(self._consecutive_soft_block_counts),
+            "persistent_block_counts": dict(self._persistent_block_counts),
         }
 
     # ── Internal enforcement ──────────────────────────────────────────────────
@@ -224,6 +226,9 @@ class ConstraintEnforcementMiddleware:
 
             elif severity == ConstraintSeverity.SOFT_BLOCK:
                 return self._handle_soft_block(v, tool_name, tool_args, tool_id)
+
+            elif severity == ConstraintSeverity.PERSISTENT_BLOCK:
+                return self._handle_persistent_block(v, tool_name, tool_args, tool_id)
 
             elif severity == ConstraintSeverity.HARD_STOP:
                 self._run_status = "stopped"
@@ -327,6 +332,48 @@ class ConstraintEnforcementMiddleware:
             "(attempt %d/%d): %s",
             name, tool_name, self._step_number,
             total, self._max_soft_attempts, v.detail,
+        )
+        return ToolMessage(content=feedback, tool_call_id=tool_id)
+
+    def _handle_persistent_block(
+        self,
+        v: ConstraintViolation,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        tool_id: str,
+    ) -> ToolMessage:
+        """Handle a PERSISTENT_BLOCK violation.
+
+        Blocks the call and returns feedback, continues the run, never escalates,
+        and offers no override — repeating the call is blocked again every time.
+        """
+        name = v.constraint_name
+        self._persistent_block_counts[name] = self._persistent_block_counts.get(name, 0) + 1
+        self._soft_blocked_calls.append(
+            {
+                "step": self._step_number,
+                "constraint_name": name,
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+                "detail": v.detail,
+                "mode": "persistent_block",
+            }
+        )
+        self._constraint_violations.append(self._violation_to_dict(v))
+
+        feedback = (
+            f"[CONSTRAINT VIOLATION — PERSISTENT_BLOCK]\n"
+            f"Constraint '{name}' was violated by tool call '{tool_name}'.\n"
+            f"The tool was NOT executed.\n"
+            f"Detail: {v.detail}\n"
+            f"This block cannot be overridden: repeating the exact same call will "
+            f"not execute it. You must choose a different action to comply with the "
+            f"constraint."
+        )
+        logger.warning(
+            "[CONSTRAINT PERSISTENT_BLOCK] %s violated by '%s' at step %d: %s "
+            "(block cannot be overridden).",
+            name, tool_name, self._step_number, v.detail,
         )
         return ToolMessage(content=feedback, tool_call_id=tool_id)
 

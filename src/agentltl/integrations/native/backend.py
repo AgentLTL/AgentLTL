@@ -249,7 +249,9 @@ class NativeOpenAIAgent:
                     args = self._parse_args(tc.function.arguments)
                     # Runtime enforcement (no-op when there are no constraints).
                     decision = self._enforcer.check(name, args, step_no)
-                    if isinstance(decision, tuple) and decision[0] in ("soft_block", "block_and_warn"):
+                    if isinstance(decision, tuple) and decision[0] in (
+                        "soft_block", "block_and_warn", "persistent_block",
+                    ):
                         # Blocked: feed the violation/warning back as this call's
                         # tool result, do NOT execute, and keep it OUT of the
                         # executed trace.
