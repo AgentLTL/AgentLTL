@@ -405,6 +405,8 @@ class MultiTurnAgent:
         max_consecutive_soft_attempts: Optional[int] = None,
         strict_runtime_safety: bool = False,
         backend: str = "native",
+        reviewer_config: Optional[Any] = None,
+        reviewer_client: Optional[Any] = None,
     ) -> None:
         if backend != "native":
             raise ValueError(
@@ -417,8 +419,7 @@ class MultiTurnAgent:
             strict=strict_runtime_safety,
             logger=logger,
         )
-        from agentltl.integrations.native.backend import NativeOpenAIAgent
-        self._impl = NativeOpenAIAgent(
+        impl_kwargs = dict(
             tools=tools,
             model=model,
             api_key=api_key,
@@ -436,6 +437,20 @@ class MultiTurnAgent:
             max_consecutive_soft_attempts=max_consecutive_soft_attempts,
             _skip_runtime_safety_check=True,
         )
+        # Inference-time reviewer ("Reinforced Agent"): when a reviewer_config is
+        # supplied, use the reviewer-wrapped native agent. Constraints and the
+        # reviewer compose (both no-op cleanly when unset), but the benchmark runs
+        # them as separate arms.
+        if reviewer_config is not None:
+            from agentltl.integrations.native.reviewed_agent import ReviewedNativeAgent
+            self._impl = ReviewedNativeAgent(
+                reviewer_config=reviewer_config,
+                reviewer_client=reviewer_client,
+                **impl_kwargs,
+            )
+        else:
+            from agentltl.integrations.native.backend import NativeOpenAIAgent
+            self._impl = NativeOpenAIAgent(**impl_kwargs)
         self.reset()
 
     def reset(self) -> None:
@@ -474,6 +489,10 @@ class MultiTurnAgent:
 
     def get_constraint_status(self) -> Dict[str, Any]:
         return self._impl.get_constraint_status()
+
+    def get_reviewer_status(self) -> Dict[str, Any]:
+        fn = getattr(self._impl, "get_reviewer_status", None)
+        return fn() if fn else {"mode": "reviewed", "enabled": False}
 
 
 __all__ = [
