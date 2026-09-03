@@ -104,6 +104,7 @@ class NativeOpenAIAgent:
         max_soft_attempts: int = 3,
         soft_block_mode: str = "cumulative",
         max_consecutive_soft_attempts: Optional[int] = None,
+        nudge_max: int = 1,
         mcp_servers: Optional[Dict[str, Any]] = None,
         _skip_runtime_safety_check: bool = False,
         **_ignored: Any,
@@ -163,6 +164,7 @@ class NativeOpenAIAgent:
             max_soft_attempts=max_soft_attempts,
             soft_block_mode=soft_block_mode,
             max_consecutive_soft_attempts=max_consecutive_soft_attempts,
+            nudge_max=nudge_max,
         )
         self.reset()
 

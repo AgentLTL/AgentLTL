@@ -97,6 +97,16 @@ class ConstraintViolation:
     tool_name: str
     tool_args: Any
     detail: str = ""
+    # `detail` is the evaluator's mechanical mismatch string ("no X call matched
+    # {...}"). These two carry the AUTHORED text: `description` says why the rule
+    # exists, `repair` says what to do about it. Both were previously computed and
+    # then dropped before the agent saw anything.
+    description: str = ""
+    repair: str = ""
+
+    def advice(self) -> str:
+        """The most actionable sentence available, or '' if there is none."""
+        return (self.repair or self.description or "").strip()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

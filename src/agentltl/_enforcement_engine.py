@@ -40,6 +40,17 @@ from .enforcement import (
 
 logger = logging.getLogger(__name__)
 
+
+def _clip(text: str, limit: int = 220) -> str:
+    """Shorten an evaluator detail for the secondary violation list.
+
+    These strings embed the full offending call payload -- several hundred
+    characters on a FHIR POST -- so an unclipped list of them is mostly a repeated
+    copy of what the agent just sent.
+    """
+    t = " ".join(str(text).split())
+    return t if len(t) <= limit else t[: limit - 1] + "\u2026"
+
 # Return type of check(): the literal "allow", or ("soft_block", feedback), or
 # ("block_and_warn", feedback), or ("persistent_block", feedback).
 Decision = Union[str, Tuple[str, str]]
@@ -62,6 +73,7 @@ class ConstraintEnforcer:
         max_soft_attempts: int = 3,
         soft_block_mode: str = "cumulative",
         max_consecutive_soft_attempts: Optional[int] = None,
+        nudge_max: int = 1,
     ) -> None:
         self._constraints: List[Any] = list(constraints or [])
         self._severities: Dict[str, ConstraintSeverity] = dict(constraint_severities or {})
@@ -77,6 +89,18 @@ class ConstraintEnforcer:
             if max_consecutive_soft_attempts is not None
             else max_soft_attempts
         )
+        # How many violated constraints one blocked call may report. A single call
+        # can violate several at once (a POST with three wrong fields), and telling
+        # the model one at a time costs a round trip per field. Capped because the
+        # opposite failure is real too: an agent handed a wall of blocks stops
+        # treating them as actionable.
+        #
+        # DEFAULT 1, deliberately: this is a library, so its default must reproduce
+        # the behaviour it had before this parameter existed -- one violation per
+        # blocked call. Callers that want the batched form opt in (the harness
+        # passes 3 via QWEN_BM_NUDGE_MAX), which also keeps it an experiment knob
+        # rather than a silent change to every existing consumer.
+        self._nudge_max = max(1, int(nudge_max))
         self.reset()
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -186,29 +210,27 @@ class ConstraintEnforcer:
 
         violations = self._evaluate_constraints(tool_name, tool_args, step_number)
 
+        # The FIRST non-tolerated violation decides the outcome of this call, exactly
+        # as before. What is new is that the other violations of the SAME severity
+        # ride along as additional advice (up to nudge_max), so a POST with three
+        # wrong fields is not rejected three times in a row over three round trips.
+        decided = None
         for v in violations:
             severity = ConstraintSeverity(v.severity)
-
             if severity == ConstraintSeverity.TOLERATE:
                 logger.warning(
                     "[CONSTRAINT TOLERATE] %s violated by '%s' at step %d: %s",
                     v.constraint_name, tool_name, step_number, v.detail,
                 )
                 self._constraint_violations.append(self._violation_to_dict(v))
+                continue
+            decided = (severity, v)
+            break
 
-            elif severity == ConstraintSeverity.SOFT_BLOCK:
-                # First soft-block found decides the outcome of this call.
-                return self._handle_soft_block(v, tool_name, tool_args, step_number)
+        if decided is not None:
+            severity, v = decided
 
-            elif severity == ConstraintSeverity.BLOCK_AND_WARN:
-                # First block-and-warn found decides the outcome of this call.
-                return self._handle_block_and_warn(v, tool_name, tool_args, step_number)
-
-            elif severity == ConstraintSeverity.PERSISTENT_BLOCK:
-                # First persistent-block found decides the outcome of this call.
-                return self._handle_persistent_block(v, tool_name, tool_args, step_number)
-
-            elif severity == ConstraintSeverity.HARD_STOP:
+            if severity == ConstraintSeverity.HARD_STOP:
                 self._run_status = "stopped"
                 self._stopped_by = v.constraint_name
                 self._constraint_violations.append(self._violation_to_dict(v))
@@ -219,6 +241,22 @@ class ConstraintEnforcer:
                     detail=v.detail,
                     violation_type="HARD_STOP",
                 )
+
+            extra = sorted(
+                (o for o in violations
+                 if o is not v and ConstraintSeverity(o.severity) == severity),
+                key=self._nudge_rank,
+            )[: max(0, self._nudge_max - 1)]
+
+            if severity == ConstraintSeverity.SOFT_BLOCK:
+                return self._handle_soft_block(
+                    v, tool_name, tool_args, step_number, extra)
+            if severity == ConstraintSeverity.BLOCK_AND_WARN:
+                return self._handle_block_and_warn(
+                    v, tool_name, tool_args, step_number, extra)
+            if severity == ConstraintSeverity.PERSISTENT_BLOCK:
+                return self._handle_persistent_block(
+                    v, tool_name, tool_args, step_number, extra)
 
         # No blocking violation — allow. Reset consecutive counters on success.
         if self._soft_block_mode in (SoftBlockMode.CONSECUTIVE, SoftBlockMode.HYBRID):
@@ -291,12 +329,66 @@ class ConstraintEnforcer:
                         tool_name=tool_name,
                         tool_args=tool_args,
                         detail=str(detail),
+                        # Previously dropped here: the spec authors a `rationale`
+                        # (-> description) and now a `repair`, both of which reach
+                        # ConstraintResult and were then thrown away one line above
+                        # this, so the agent only ever saw `detail`.
+                        description=str(per_c.get("description") or ""),
+                        repair=str(per_c.get("repair") or ""),
                     )
                 )
         return violations
 
+    # Which kind of mistake to lead with when a call violates several constraints
+    # at once. Keyed on the constraint-name prefix ("bind::records_bp_value"), so it
+    # works for both the obligation names and the older layer names, and falls back
+    # to the middle of the range for anything unrecognised.
+    _NUDGE_PRIORITY = {
+        "bind": 0, "abstain": 1, "source": 2, "order": 3, "do": 4, "cover": 5,
+        "L2": 0, "L5": 1, "L4": 2, "L3": 3, "L1": 4, "L6": 0,
+    }
+
+    @classmethod
+    def _nudge_rank(cls, v: ConstraintViolation) -> tuple:
+        prefix = str(v.constraint_name).split("::", 1)[0]
+        # A violation carrying an actionable repair outranks one that only has a
+        # mechanical detail: it is the one the model can do something about.
+        return (0 if v.advice() else 1, cls._NUDGE_PRIORITY.get(prefix, 3))
+
+    def _compose(self, tag: str, v: ConstraintViolation, tool_name: str,
+                 closing: str, extra: List[ConstraintViolation]) -> str:
+        """Build the agent-facing feedback.
+
+        With no authored text and no extra violations this is byte-identical to the
+        message this engine produced before `repair` existed -- that equality is the
+        backwards-compatibility contract, and it is pinned by a test.
+        """
+        lines = [
+            f"[CONSTRAINT VIOLATION — {tag}]",
+            f"Constraint '{v.constraint_name}' was violated by tool call '{tool_name}'.",
+            "The tool was NOT executed.",
+        ]
+        advice = v.advice()
+        if advice:
+            lines.append(f"To comply: {advice}")
+        lines.append(f"Detail: {v.detail}")
+        if extra:
+            lines.append(
+                f"This call also violates {len(extra)} other constraint(s); "
+                "fixing them together avoids another rejection:")
+            for i, other in enumerate(extra, 1):
+                # Advice ALONE when there is any: the evaluator's detail embeds the
+                # whole offending payload, so repeating it per violation buries the
+                # very instructions this list exists to deliver. The primary
+                # violation above keeps its full untruncated detail, and that is
+                # what preserves byte-compatibility with the pre-`repair` message.
+                lines.append(f"  {i}. {other.advice() or _clip(other.detail)}")
+        lines.append(closing)
+        return "\n".join(lines)
+
     def _handle_soft_block(
-        self, v: ConstraintViolation, tool_name: str, tool_args: Dict[str, Any], step_number: int
+        self, v: ConstraintViolation, tool_name: str, tool_args: Dict[str, Any],
+        step_number: int, extra: Optional[List[ConstraintViolation]] = None
     ) -> Tuple[str, str]:
         name = v.constraint_name
         self._soft_block_counts[name] = self._soft_block_counts.get(name, 0) + 1
@@ -344,14 +436,12 @@ class ConstraintEnforcer:
                 threshold_str=threshold_str,
             )
 
-        feedback = (
-            f"[CONSTRAINT VIOLATION — SOFT_BLOCK]\n"
-            f"Constraint '{name}' was violated by tool call '{tool_name}'.\n"
-            f"The tool was NOT executed.\n"
-            f"Detail: {v.detail}\n"
-            f"Attempt {total}/{self._max_soft_attempts} ({self._soft_block_mode.value} mode). "
-            f"Please choose a different action to comply with this constraint."
-        )
+        feedback = self._compose(
+            "SOFT_BLOCK", v, tool_name,
+            f"Attempt {total}/{self._max_soft_attempts} "
+            f"({self._soft_block_mode.value} mode). "
+            f"Please choose a different action to comply with this constraint.",
+            extra or [])
         logger.warning(
             "[CONSTRAINT SOFT_BLOCK] %s violated by '%s' at step %d (attempt %d/%d): %s",
             name, tool_name, step_number, total, self._max_soft_attempts, v.detail,
@@ -359,7 +449,8 @@ class ConstraintEnforcer:
         return ("soft_block", feedback)
 
     def _handle_block_and_warn(
-        self, v: ConstraintViolation, tool_name: str, tool_args: Dict[str, Any], step_number: int
+        self, v: ConstraintViolation, tool_name: str, tool_args: Dict[str, Any],
+        step_number: int, extra: Optional[List[ConstraintViolation]] = None
     ) -> Tuple[str, str]:
         """Block the call and warn, but NEVER escalate. The model may override by
         re-issuing the byte-identical call in a later generation (see check)."""
@@ -385,16 +476,13 @@ class ConstraintEnforcer:
         )
         self._constraint_violations.append(self._violation_to_dict(v))
 
-        feedback = (
-            f"[CONSTRAINT VIOLATION — BLOCK_AND_WARN]\n"
-            f"Constraint '{name}' was violated by tool call '{tool_name}'.\n"
-            f"The tool was NOT executed.\n"
-            f"Detail: {v.detail}\n"
-            f"This is a warning, not a hard block. If you are sure this call is "
-            f"necessary, you may override it by re-issuing the EXACT same call "
-            f"(same tool name and same arguments) as your very next action; "
-            f"otherwise choose a different action to comply with the constraint."
-        )
+        feedback = self._compose(
+            "BLOCK_AND_WARN", v, tool_name,
+            "This is a warning, not a hard block. If you are sure this call is "
+            "necessary, you may override it by re-issuing the EXACT same call "
+            "(same tool name and same arguments) as your very next action; "
+            "otherwise choose a different action to comply with the constraint.",
+            extra or [])
         logger.warning(
             "[CONSTRAINT BLOCK_AND_WARN] %s violated by '%s' at step %d: %s "
             "(model may override by repeating the exact call).",
@@ -403,7 +491,8 @@ class ConstraintEnforcer:
         return ("block_and_warn", feedback)
 
     def _handle_persistent_block(
-        self, v: ConstraintViolation, tool_name: str, tool_args: Dict[str, Any], step_number: int
+        self, v: ConstraintViolation, tool_name: str, tool_args: Dict[str, Any],
+        step_number: int, extra: Optional[List[ConstraintViolation]] = None
     ) -> Tuple[str, str]:
         """Block the call and warn, never escalate, and NEVER allow an override. Unlike
         BLOCK_AND_WARN this sets no insistence pointer, so re-issuing the identical call
@@ -422,15 +511,12 @@ class ConstraintEnforcer:
         )
         self._constraint_violations.append(self._violation_to_dict(v))
 
-        feedback = (
-            f"[CONSTRAINT VIOLATION — PERSISTENT_BLOCK]\n"
-            f"Constraint '{name}' was violated by tool call '{tool_name}'.\n"
-            f"The tool was NOT executed.\n"
-            f"Detail: {v.detail}\n"
-            f"This block cannot be overridden: repeating the exact same call will "
-            f"not execute it. You must choose a different action to comply with the "
-            f"constraint."
-        )
+        feedback = self._compose(
+            "PERSISTENT_BLOCK", v, tool_name,
+            "This block cannot be overridden: repeating the exact same call will "
+            "not execute it. You must choose a different action to comply with the "
+            "constraint.",
+            extra or [])
         logger.warning(
             "[CONSTRAINT PERSISTENT_BLOCK] %s violated by '%s' at step %d: %s "
             "(block cannot be overridden).",
@@ -447,4 +533,8 @@ class ConstraintEnforcer:
             "tool_name": v.tool_name,
             "tool_args": v.tool_args,
             "detail": v.detail,
+            # Kept in the record so post-hoc analysis can tell whether the agent was
+            # actually given something actionable when this call was blocked, or only
+            # a mechanical mismatch string.
+            "repair": v.repair,
         }

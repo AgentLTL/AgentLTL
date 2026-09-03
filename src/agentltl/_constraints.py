@@ -46,11 +46,18 @@ class Constraint:
         formula:     The LTL formula that must hold on a valid trace.
         weight:      Importance weight w(κᵢ).  Higher → more impact on C.
         description: Optional longer explanation shown in reports.
+        repair:      Optional imperative instruction shown to the AGENT when this
+                     constraint blocks a call ("Send note as an object with a text
+                     field carrying the referral comment"). Where `description`
+                     explains why a rule exists, `repair` says what to do about it.
+                     Empty by default, and when empty the enforcement feedback is
+                     byte-identical to what it was before this field existed.
     """
     name: str
     formula: Formula
     weight: float = 1.0
     description: str = ""
+    repair: str = ""
     applies_to_final_answer: bool = False
     """When True, this constraint is also evaluated before the final_answer tool
     is executed (online enforcement).  Default False preserves existing behaviour
@@ -73,6 +80,7 @@ class ConstraintResult:
     passed: bool
     detail: str
     description: str = ""
+    repair: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -81,6 +89,7 @@ class ConstraintResult:
             "passed": self.passed,
             "detail": self.detail,
             "description": self.description,
+            "repair": self.repair,
         }
 
 
@@ -181,6 +190,7 @@ def verify_trace(
             passed=eval_result.passed,
             detail=eval_result.detail,
             description=c.description,
+            repair=getattr(c, "repair", ""),
         ))
 
     score = _compute_score(results)

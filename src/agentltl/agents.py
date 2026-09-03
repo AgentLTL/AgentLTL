@@ -403,6 +403,10 @@ class MultiTurnAgent:
         max_soft_attempts: int = 3,
         soft_block_mode: str = "cumulative",
         max_consecutive_soft_attempts: Optional[int] = None,
+        # How many violated constraints one blocked call may report. 1 preserves the
+        # historical one-at-a-time behaviour; the harness raises it so a call with
+        # several wrong fields does not cost one round trip per field.
+        nudge_max: int = 1,
         strict_runtime_safety: bool = False,
         backend: str = "native",
         reviewer_config: Optional[Any] = None,
@@ -435,6 +439,7 @@ class MultiTurnAgent:
             max_soft_attempts=max_soft_attempts,
             soft_block_mode=soft_block_mode,
             max_consecutive_soft_attempts=max_consecutive_soft_attempts,
+            nudge_max=nudge_max,
             _skip_runtime_safety_check=True,
         )
         # Inference-time reviewer ("Reinforced Agent"): when a reviewer_config is
