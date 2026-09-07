@@ -97,6 +97,11 @@ class NativeOpenAIAgent:
         model_instance: Optional[Any] = None,
         system_prompt: Optional[str] = None,
         temperature: Optional[float] = None,
+        # Cap on each completion. `None` means "ask the server for its default", which
+        # against a gateway-fronted vLLM means generate-until-context-exhausted and an
+        # APIConnectionError that looks like a network fault. AGENTLTL_MAX_TOKENS sets
+        # the default so existing callers get a bounded request without changing.
+        max_tokens: Optional[int] = None,
         # constraint params (used by AgentWithConstraints / MultiTurnAgent)
         constraints: Optional[List[Any]] = None,
         constraint_severities: Optional[Dict[str, ConstraintSeverity]] = None,
@@ -113,6 +118,11 @@ class NativeOpenAIAgent:
             logger.warning("NativeOpenAIAgent: mcp_servers is not supported and is ignored.")
         if _ignored:
             logger.debug("NativeOpenAIAgent ignoring extra kwargs: %s", list(_ignored))
+
+        if max_tokens is None:
+            _env = os.environ.get("AGENTLTL_MAX_TOKENS", "4096").strip()
+            max_tokens = int(_env) if _env.isdigit() and int(_env) > 0 else None
+        self._max_tokens: Optional[int] = max_tokens
 
         self._tools: List[Any] = list(tools or [])
         self._tools_by_name = {t.name: t for t in self._tools}
@@ -312,6 +322,20 @@ class NativeOpenAIAgent:
             kwargs["seed"] = self._model_seed
         if self._temperature is not None:
             kwargs["temperature"] = self._temperature
+        # Bound the completion, as a GUARD rather than as a cure. An unbounded request
+        # lets the server generate until the context window is exhausted, and behind a
+        # gateway with a read deadline that surfaces as `APIConnectionError` -- which
+        # reads as a network fault. A sweep put the deadline at ~50s: max_tokens of
+        # 256/512/1024/2048 returned in 5-34s and 4096/unbounded both failed at
+        # exactly 50.0s.
+        #
+        # It is worth setting, but it does not fix the underlying problem and 4096 is
+        # itself above the ceiling when a reasoning model is left reasoning. The real
+        # cause of the failures this was first written for was chain-of-thought left
+        # ON, spending ~1845 tokens before the first tool call; disabling it gave 451
+        # tokens in 8.4s. Bound the request AND keep generations short.
+        if self._max_tokens is not None:
+            kwargs["max_tokens"] = self._max_tokens
         return self._client.chat.completions.create(**kwargs)
 
     @staticmethod
