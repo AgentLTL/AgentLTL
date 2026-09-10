@@ -26,6 +26,7 @@ Tools are smolagents ``Tool`` objects (``.name/.description/.inputs``, callable 
 from __future__ import annotations
 
 import json
+import re
 import logging
 import os
 from typing import Any, Dict, List, Optional
@@ -93,6 +94,27 @@ class NativeOpenAIAgent:
         base_url: Optional[str] = None,
         bill_to: Optional[str] = None,
         max_steps: int = 10,
+        # A BLOCKED TURN IS NOT A STEP THE AGENT SPENT. `max_steps` bounds model
+        # turns, so an intercepted call used to consume the same budget as an
+        # executed one -- which handicaps every enforced arm against its own
+        # baseline by exactly the number of times we interrupt it. Measured on mab
+        # run 9: `persistent_block` exhausted the budget on 16 of 150 episodes at
+        # 14.1 blocks and 0.9 EXECUTED calls each, and every one of those was then
+        # scored as a task failure. The comparison being measured is whether
+        # enforcement improves correctness, so charging the enforced arm for turns
+        # the baseline never pays confounds precisely that.
+        #
+        # When set, a turn in which NOTHING executed draws on this allowance
+        # instead of on `max_steps`. It is bounded rather than free because
+        # `persistent_block` has no escape hatch: an agent repeating a call we
+        # keep refusing would otherwise loop forever. Exhausting it ends the
+        # episode and is reported (`blocked_steps_exhausted`) rather than being
+        # absorbed into "no final answer".
+        #
+        # `None` keeps the historical behaviour exactly, so no existing arm changes
+        # unless its runner opts in. This alters what an episode can do, so it is a
+        # BETWEEN-RUNS change: switch it on with a new run index.
+        max_blocked_steps: Optional[int] = None,
         model_seed: Optional[int] = None,
         model_instance: Optional[Any] = None,
         system_prompt: Optional[str] = None,
@@ -128,6 +150,11 @@ class NativeOpenAIAgent:
         self._tools_by_name = {t.name: t for t in self._tools}
         self._tool_schemas = [tool_to_openai(t) for t in self._tools]
         self._max_steps = max_steps
+        self._max_blocked_steps = max_blocked_steps
+        # Reported so the latency cost of enforcement stays visible even though it
+        # no longer distorts the correctness comparison.
+        self._blocked_steps = 0
+        self._blocked_steps_exhausted = False
         self._model_seed = model_seed
         self._temperature = temperature
         self._system_prompt = system_prompt if system_prompt is not None else DEFAULT_SYSTEM_PROMPT
@@ -227,7 +254,16 @@ class NativeOpenAIAgent:
         answer: Optional[str] = None
 
         try:
-            for _ in range(self._max_steps):
+            # PRODUCTIVE turns are counted against `max_steps`; turns in which
+            # nothing executed draw on `max_blocked_steps` when that is set. With
+            # it unset the two are the same counter and the loop is byte-equivalent
+            # to `for _ in range(self._max_steps)`.
+            steps_used = blocked_used = 0
+            while steps_used < self._max_steps:
+                if (self._max_blocked_steps is not None
+                        and blocked_used >= self._max_blocked_steps):
+                    self._blocked_steps_exhausted = True
+                    break
                 self._model_step += 1
                 step_no = self._model_step
                 resp = self._chat()
@@ -249,6 +285,8 @@ class NativeOpenAIAgent:
                 if not tool_calls:
                     answer = msg.content          # no tool call => final answer
                     break
+
+                n_executed = 0
 
                 # New LLM generation — advances the BLOCK_AND_WARN insistence
                 # pointer so a call blocked in a prior generation becomes
@@ -277,12 +315,25 @@ class NativeOpenAIAgent:
                         {"role": "tool", "tool_call_id": tc.id, "content": result_str}
                     )
                     self._enforcer.record_completed(name, args, tc.id, result_str)
+                    n_executed += 1
                     call_record = {
                         "step": step_no, "turn": turn, "tool_name": name,
                         "arguments": args, "id": tc.id,
                         "tool_result": result_str, "action_output": None,
                     }
                     turn_tool_calls.append(call_record)
+
+                # A generation carrying a MIX counts as productive: the agent got
+                # work done, and only a turn where every call was refused is one we
+                # took away from it.
+                if n_executed:
+                    steps_used += 1
+                else:
+                    self._blocked_steps += 1
+                    if self._max_blocked_steps is None:
+                        steps_used += 1          # historical behaviour
+                    else:
+                        blocked_used += 1
             error = None
         except ConstraintViolationError as exc:
             # HARD_STOP / soft-block escalation aborts the run.
@@ -364,8 +415,33 @@ class NativeOpenAIAgent:
         except (json.JSONDecodeError, TypeError):
             return {}
 
-    def _exec_tool(self, name: str, args: Dict[str, Any]) -> str:
+    @staticmethod
+    def _norm_tool_name(name: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
+
+    def _resolve_tool(self, name: str):
+        """Exact match, then a normalised one -- but only if it is UNAMBIGUOUS.
+
+        An OpenAI function name cannot contain a dot, so an adapter that sanitises
+        `analytics.create_plot` to `analytics_create_plot` will still be handed the
+        dotted spelling by the model. Refusing it measures the sanitisation rather
+        than the agent: 4755 calls across 125 WorkBench instances were rejected this
+        way in one run, and a constraint naming the sanitised tool cannot match a
+        call spelled the other way, so compliance silently measures the wrong thing.
+
+        Two tools that normalise to the same key leave the lookup a MISS. Executing
+        the wrong tool is worse than declining.
+        """
         tool = self._tools_by_name.get(name)
+        if tool is not None:
+            return tool
+        key = self._norm_tool_name(name)
+        hits = [t for n, t in self._tools_by_name.items()
+                if self._norm_tool_name(n) == key]
+        return hits[0] if len(hits) == 1 else None
+
+    def _exec_tool(self, name: str, args: Dict[str, Any]) -> str:
+        tool = self._resolve_tool(name)
         if tool is None:
             return f"ERROR: unknown tool '{name}'."
         try:
@@ -397,4 +473,10 @@ class NativeOpenAIAgent:
         metrics["constraint_violations"] = status["violations"]
         metrics["constraint_checks"] = status["constraint_checks"]
         metrics["completed_trace"] = status["completed_trace"]
+        # The LATENCY cost of enforcement, kept reportable now that it no longer
+        # distorts the correctness comparison: how many generations were spent
+        # entirely on refused calls, and whether that allowance ran out (which is a
+        # DIFFERENT outcome from an agent that explored and gave up).
+        metrics["blocked_steps"] = self._blocked_steps
+        metrics["blocked_steps_exhausted"] = self._blocked_steps_exhausted
         return metrics

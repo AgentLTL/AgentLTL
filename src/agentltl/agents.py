@@ -394,6 +394,10 @@ class MultiTurnAgent:
         provider: Optional[str] = None,
         base_url: Optional[str] = None,
         max_steps: int = 10,
+        # A blocked turn is not a step the agent spent. `None` keeps the historical
+        # behaviour, where an intercepted call consumes the same budget as an
+        # executed one -- see NativeOpenAIAgent for the measurement.
+        max_blocked_steps: Optional[int] = None,
         model_seed: Optional[int] = None,
         model_instance: Optional[Any] = None,
         system_prompt: Optional[str] = None,
@@ -430,6 +434,7 @@ class MultiTurnAgent:
             provider=provider,
             base_url=base_url,
             max_steps=max_steps,
+            max_blocked_steps=max_blocked_steps,
             model_seed=model_seed,
             model_instance=model_instance,
             system_prompt=system_prompt,
