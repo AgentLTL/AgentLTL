@@ -132,6 +132,10 @@ class NativeOpenAIAgent:
         soft_block_mode: str = "cumulative",
         max_consecutive_soft_attempts: Optional[int] = None,
         nudge_max: int = 1,
+        # How many times the agent may be sent back when it tries to finish with a
+        # liveness obligation unmet. 0 is off and is the default, so an existing
+        # caller is byte-identical. See ConstraintEnforcer.check_termination.
+        max_termination_nudges: int = 0,
         mcp_servers: Optional[Dict[str, Any]] = None,
         _skip_runtime_safety_check: bool = False,
         **_ignored: Any,
@@ -202,6 +206,7 @@ class NativeOpenAIAgent:
             soft_block_mode=soft_block_mode,
             max_consecutive_soft_attempts=max_consecutive_soft_attempts,
             nudge_max=nudge_max,
+            max_termination_nudges=max_termination_nudges,
         )
         self.reset()
 
@@ -283,6 +288,28 @@ class NativeOpenAIAgent:
                 })
 
                 if not tool_calls:
+                    # THE AGENT IS TRYING TO FINISH, so the prefix is final and a
+                    # liveness obligation becomes decidable here for the first time.
+                    # `Called(x)` cannot block mid-episode -- the call might still be
+                    # coming -- which is why 52% of WorkBench's and 35% of bfcl's
+                    # wrong episodes fail ONLY constraints no mode could ever reach.
+                    # Bounded inside the enforcer, and inert unless constraints were
+                    # opted in with `applies_to_final_answer`.
+                    # getattr, not a direct call: the enforcer is a collaborator
+                    # and a caller may supply one that predates this gate.
+                    _ct = getattr(self._enforcer, "check_termination", None)
+                    nudge = _ct() if callable(_ct) else None
+                    if nudge:
+                        self._messages.append({"role": "user", "content": nudge})
+                        # A turn spent being sent back executed nothing, so it draws
+                        # on the blocked allowance for the same reason a refused call
+                        # does: it is a turn we took away from the agent.
+                        self._blocked_steps += 1
+                        if self._max_blocked_steps is None:
+                            steps_used += 1
+                        else:
+                            blocked_used += 1
+                        continue
                     answer = msg.content          # no tool call => final answer
                     break
 

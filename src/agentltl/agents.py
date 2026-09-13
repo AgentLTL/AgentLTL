@@ -398,6 +398,7 @@ class MultiTurnAgent:
         # behaviour, where an intercepted call consumes the same budget as an
         # executed one -- see NativeOpenAIAgent for the measurement.
         max_blocked_steps: Optional[int] = None,
+        max_termination_nudges: int = 0,
         model_seed: Optional[int] = None,
         model_instance: Optional[Any] = None,
         system_prompt: Optional[str] = None,
@@ -435,6 +436,7 @@ class MultiTurnAgent:
             base_url=base_url,
             max_steps=max_steps,
             max_blocked_steps=max_blocked_steps,
+            max_termination_nudges=max_termination_nudges,
             model_seed=model_seed,
             model_instance=model_instance,
             system_prompt=system_prompt,

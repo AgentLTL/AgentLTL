@@ -64,6 +64,25 @@ class Constraint:
     did not compute one, and consumers fall back to whatever rule they used before.
     A caller that sets it is telling the enforcer that blocking this constraint is
     licensed by its shape rather than by a naming convention."""
+    grounding: str = ""
+    """Where the asserted VALUE came from: "schema" (the tool schema prescribes it),
+    "quoted" (a literal span of the task text), "derived" (computed by a rule), or
+    empty when the caller did not say.
+
+    Carried because it predicts whether blocking on a constraint is informative, and
+    the prediction is stark. Per episode, on baseline traces, a constraint of each
+    class fires this often on a CORRECT run versus a WRONG one:
+
+        bfcl derived  0.45 -> 0.96   2.11x   informative
+        bfcl quoted   1.55 -> 1.68   1.08x   a coin flip
+        mcpu quoted   1.00 -> 0.78   0.78x   fires MORE on correct behaviour
+        mab  every    0.00 -> 0.77   inf
+
+    MedAgentBench is the only family whose values come from the schema, where the
+    wire form is canonical by construction; everywhere else a quoted value is what
+    the task SAYS ('Tesla', 'business class', 'Rivermist') and the wire takes
+    something else ('TSLA', 'business', 'RMS'). Scoring is unaffected either way --
+    only `compliance.blocks_constraint` reads this."""
     applies_to_final_answer: bool = False
     """When True, this constraint is also evaluated before the final_answer tool
     is executed (online enforcement).  Default False preserves existing behaviour

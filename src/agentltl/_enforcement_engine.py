@@ -74,6 +74,7 @@ class ConstraintEnforcer:
         soft_block_mode: str = "cumulative",
         max_consecutive_soft_attempts: Optional[int] = None,
         nudge_max: int = 1,
+        max_termination_nudges: int = 0,
     ) -> None:
         self._constraints: List[Any] = list(constraints or [])
         self._severities: Dict[str, ConstraintSeverity] = dict(constraint_severities or {})
@@ -101,6 +102,10 @@ class ConstraintEnforcer:
         # passes 3 via QWEN_BM_NUDGE_MAX), which also keeps it an experiment knob
         # rather than a silent change to every existing consumer.
         self._nudge_max = max(1, int(nudge_max))
+        # How many times the agent may be sent back when it tries to FINISH with a
+        # liveness obligation unmet. 0 is off, and off is the default so a caller
+        # that never sets it gets byte-identical behaviour. See check_termination.
+        self._max_termination_nudges = max(0, int(max_termination_nudges))
         self.reset()
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -113,6 +118,8 @@ class ConstraintEnforcer:
         self._consecutive_soft_block_counts: Dict[str, int] = {}
         self._soft_blocked_calls: List[Dict[str, Any]] = []
         self._constraint_violations: List[Dict[str, Any]] = []
+        self._termination_nudges = 0
+        self._termination_nudged_names: List[str] = []
         self._constraint_checks: int = 0
         self._run_status: str = "completed"
         self._stopped_by: Optional[str] = None
@@ -289,6 +296,10 @@ class ConstraintEnforcer:
             "soft_block_counts": dict(self._soft_block_counts),
             "soft_block_mode": self._soft_block_mode.value,
             "consecutive_soft_block_counts": dict(self._consecutive_soft_block_counts),
+            # Recorded so the termination class can be scored on its OWN W/L rather
+            # than inferred from a net that also moves for other reasons.
+            "termination_nudges": self._termination_nudges,
+            "termination_nudged_names": list(self._termination_nudged_names),
             "block_and_warn_counts": dict(self._block_and_warn_counts),
             "block_and_warn_overrides": list(self._block_and_warn_overrides),
             "block_and_warn_override_count": len(self._block_and_warn_overrides),
@@ -296,6 +307,111 @@ class ConstraintEnforcer:
         }
 
     # ── Internal ──────────────────────────────────────────────────────────────
+
+    def check_termination(self) -> Optional[str]:
+        """The agent is about to FINISH. Is a liveness obligation still unmet?
+
+        `Called(x)` is a LIVENESS property: no finite prefix falsifies it, because
+        the call might still come. That is why AgentLTL classifies it
+        `RuntimeSafety.UNSAFE` and why it has never been blockable -- mid-episode,
+        "you have not called x" is not yet a violation. **At termination it is.**
+        The agent has declared the prefix final, so the obligation is decidable
+        exactly here and nowhere earlier.
+
+        Which is worth doing because this class is the informative one. Failures per
+        episode on stored baseline traces, partitioned by whether that instance's own
+        baseline was correct:
+
+            wb    liveness  0.18 correct / 1.12 wrong = 6.31x   (what blocks: 2.39x)
+            bfcl  liveness  0.36 correct / 0.91 wrong = 2.50x   (what blocks: 1.61x)
+
+        and it accounts for 52% of wb's and 35% of bfcl's wrong episodes -- errors
+        whose constraint the spec already holds and no mode could reach.
+
+        Three things make this safe where mid-episode blocking is not:
+
+        * **It costs a TURN, not an ACTION.** A blocked call takes away something the
+          agent was going to do; being sent back to finish takes a round trip. Even at
+          an equal false-alarm rate that is the better trade.
+        * **`partial_trace=False`.** Everywhere else the enforcer evaluates on a
+          growing prefix with trigger semantics, because a pending obligation must not
+          read as violated. Here the prefix IS the trace, so the ordinary semantics
+          are the correct ones.
+        * **It is BOUNDED.** After `max_termination_nudges` the agent finishes whatever
+          it has. Unbounded, an agent that cannot satisfy the obligation -- because the
+          tool is not in its staged toolset, or because we are simply wrong -- would
+          loop at the exit, which is the block storm of the mid-episode path relocated
+          rather than avoided.
+
+        Only constraints carrying `applies_to_final_answer` are consulted, so this is
+        inert unless the caller opts specific constraints in.
+
+        Returns the message to hand back, or None to let the episode end.
+        """
+        if self._max_termination_nudges <= 0:
+            return None
+        if self._termination_nudges >= self._max_termination_nudges:
+            return None
+        pending = [c for c in self._constraints
+                   if getattr(c, "applies_to_final_answer", False)]
+        if not pending:
+            return None
+
+        from agentltl import verify_trace  # lazy import -- avoids circular deps
+
+        metrics = {"tool_calls": list(self._completed_tool_calls)}
+        unmet: List[Any] = []
+        for constraint in pending:
+            # NOT partial_trace: the prefix is final, which is the whole point.
+            result = verify_trace(metrics, [constraint], partial_trace=False)
+            if result.get("compliance_label") in ("FULL", "N/A"):
+                continue
+            per_c = (result.get("constraints") or [{}])[0]
+            unmet.append((constraint, per_c))
+        if not unmet:
+            return None
+
+        self._termination_nudges += 1
+        lines = []
+        for constraint, per_c in unmet[:self._nudge_max]:
+            name = getattr(constraint, "name", "?")
+            self._termination_nudged_names.append(str(name))
+            self._constraint_violations.append({
+                "constraint_name": str(name),
+                "severity": "termination_nudge",
+                "step_number": -1,
+                "tool_name": None,
+                "tool_args": {},
+                "detail": str(per_c.get("detail") or ""),
+            })
+            # Name the obligation and what to do about it. An unactionable message is
+            # a message the agent gives up on, which is how one WorkBench episode ate
+            # five blocks and wrote nothing.
+            repair = str(per_c.get("repair") or "").strip()
+            desc = str(per_c.get("description") or "").strip()
+            why = repair or desc or str(per_c.get("detail") or "").strip()
+            lines.append("  - %s%s" % (name, (": " + why) if why else ""))
+        more = len(unmet) - len(lines)
+        if more > 0:
+            lines.append("  - (and %d more)" % more)
+        return (
+            "Do not finish yet. The procedure for this task is not complete -- "
+            "the following required step(s) have not been carried out:\n"
+            + "\n".join(lines)
+            + "\n\nCarry them out now, then give your final answer. If you believe a "
+              "step is genuinely not applicable here, say so explicitly and finish."
+        )
+
+    @property
+    def termination_nudges(self) -> int:
+        """How many times the agent was sent back at the exit."""
+        return self._termination_nudges
+
+    @property
+    def termination_nudged_names(self) -> List[str]:
+        """Which obligations it was sent back for -- recorded so the class can be
+        scored on its own W/L rather than inferred from a net."""
+        return list(self._termination_nudged_names)
 
     def _evaluate_constraints(
         self, tool_name: str, tool_args: Dict[str, Any], step_number: int
