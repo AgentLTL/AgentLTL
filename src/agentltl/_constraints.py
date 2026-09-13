@@ -83,6 +83,21 @@ class Constraint:
     the task SAYS ('Tesla', 'business class', 'Rivermist') and the wire takes
     something else ('TSLA', 'business', 'RMS'). Scoring is unaffected either way --
     only `compliance.blocks_constraint` reads this."""
+    klass: str = ""
+    """A coarse, STRUCTURAL family for the constraint, computed by the caller from the
+    formula type rather than from its name -- "prohibition" for Not(Called(...)),
+    "identity" for SameValueAcross, empty otherwise.
+
+    Carried for the same reason as `grounding`: a runtime policy may want to stop a
+    whole family from intercepting without changing what is scored. Measured on bfcl
+    over four runs, credited per (constraint, episode) and partitioned by that
+    instance's own baseline:
+
+        prohibition  135 fired on correct, 130 broke (96%) | 18 on wrong,  0 fixed
+        identity      59 fired on correct,  42 broke (71%) | 95 on wrong,  0 fixed
+
+    Neither has ever repaired an episode. Scoring is unaffected either way -- only
+    `compliance.blocks_constraint` reads this."""
     applies_to_final_answer: bool = False
     """When True, this constraint is also evaluated before the final_answer tool
     is executed (online enforcement).  Default False preserves existing behaviour
