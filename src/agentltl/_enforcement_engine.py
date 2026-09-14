@@ -56,6 +56,43 @@ def _clip(text: str, limit: int = 220) -> str:
 Decision = Union[str, Tuple[str, str]]
 
 
+
+def _is_irrecoverable(node: Any, _depth: int = 0) -> bool:
+    """Can a violation of this formula ever be repaired by a LATER call?
+
+    The safety/liveness split, applied to suppression rather than to blocking.
+
+    * a PROHIBITION -- `Not(Called(x))` -- is permanent: once x has run, nothing
+      appended can make it true again;
+    * an ORDERING (`Before`) and an upper-bound COUNT (`CalledNTimes` with a `<=`)
+      are also monotone: a later call cannot move a first index back or remove a
+      call already made;
+    * an OBLIGATION (`Called`, `CalledWith`, and everything compiled to the
+      format-tolerant `called_with_like`) is NOT permanent -- it reads as failing
+      simply because nothing has satisfied it YET, and the candidate call may be
+      exactly what satisfies it.
+
+    Returns False when unsure: suppressing wrongly silences a real block, while
+    failing to suppress only restores the previous behaviour for that constraint.
+    """
+    if node is None or _depth > 12:
+        return False
+    name = type(node).__name__
+    if name == "Not":
+        inner = getattr(node, "operand", None)
+        return type(inner).__name__ in ("Called", "CalledWith")
+    if name in ("Before", "CalledNTimes"):
+        return True
+    for attr in ("operand", "left", "right", "antecedent", "consequent", "body"):
+        child = getattr(node, attr, None)
+        if child is not None and _is_irrecoverable(child, _depth + 1):
+            return True
+    for attr in ("branches", "operands", "children", "conjuncts", "disjuncts"):
+        for child in (getattr(node, attr, None) or []):
+            if _is_irrecoverable(child, _depth + 1):
+                return True
+    return False
+
 class ConstraintEnforcer:
     """Stateful FOLTL runtime enforcer, framework-agnostic.
 
@@ -121,6 +158,9 @@ class ConstraintEnforcer:
         self._termination_nudges = 0
         self._termination_nudged_names: List[str] = []
         self._constraint_checks: int = 0
+        # how many refusals marginal causation suppressed: the constraint was
+        # ALREADY violated by the prefix, so this call is not its cause
+        self._already_violated: int = 0
         self._run_status: str = "completed"
         self._stopped_by: Optional[str] = None
         # ── BLOCK_AND_WARN state ──
@@ -291,6 +331,7 @@ class ConstraintEnforcer:
             "stopped_by": self._stopped_by,
             "violations": list(self._constraint_violations),
             "constraint_checks": self._constraint_checks,
+            "already_violated_skips": self._already_violated,
             "completed_trace": list(self._completed_tool_calls),
             "soft_blocked_calls": list(self._soft_blocked_calls),
             "soft_block_counts": dict(self._soft_block_counts),
@@ -423,10 +464,12 @@ class ConstraintEnforcer:
 
         from agentltl import verify_trace  # lazy import — avoids circular deps
 
-        prospective_calls = list(self._completed_tool_calls) + [
+        completed_calls = list(self._completed_tool_calls)
+        prospective_calls = completed_calls + [
             {"tool_name": tool_name, "arguments": tool_args}
         ]
         metrics = {"tool_calls": prospective_calls}
+        prefix_metrics = {"tool_calls": completed_calls}
 
         violations: List[ConstraintViolation] = []
         self._constraint_checks += len(self._constraints)
@@ -434,6 +477,45 @@ class ConstraintEnforcer:
         for constraint in self._constraints:
             result = verify_trace(metrics, [constraint], partial_trace=True)
             if result.get("compliance_label") not in ("FULL", "N/A"):
+                # MARGINAL CAUSATION. Refuse a call only for what IT newly breaks.
+                #
+                # A safety property that is already irrecoverably violated --
+                # `Not(Called(echo))` once echo has run -- stays false for the rest
+                # of the episode, so evaluating it on `completed + candidate` failed
+                # for EVERY later call, whatever tool it was:
+                #
+                #     echo  BLOCKED  NOT("echo" was called (call #5).)
+                #     cat   BLOCKED  NOT("echo" was called (call #5).)
+                #     wc    BLOCKED  NOT("echo" was called (call #5).)
+                #
+                # `cat` and `wc` are refused for something `echo` did, by a
+                # constraint that does not name them, and the agent is walled off
+                # from its whole toolset. Repeats were 54% of run 19's blocks and
+                # 59% of run 12's; on wb, 42 of 46 enforcement deaths are an agent
+                # looping on a refusal it cannot satisfy.
+                #
+                # Worse in `block_and_warn`, the mode that wins: its verbatim-repeat
+                # escape hatch lets the offending call THROUGH, permanently
+                # falsifying the constraint, so the escape hatch converted one false
+                # alarm into a block storm. Other-tool repeats are 31% of its blocks
+                # against 0.1-2.9% of persistent_block's.
+                #
+                # If the prefix ALONE already violates it, this call is not the
+                # cause and refusing it repairs nothing.
+                # Only for an IRRECOVERABLE violation. A constraint the prefix
+                # fails is not automatically "already broken": an unmet OBLIGATION
+                # (`CalledWith`) reads as failing until something satisfies it, and
+                # `called_with_like` is ANY-call, so the current call is precisely
+                # the chance to meet it. Suppressing those would retire mab's
+                # winning machinery -- a second wrong POST would stop being
+                # redirected, which is 307W/8L of `bind`. Only a violated
+                # PROHIBITION or a breached ordering/cap is permanent.
+                if completed_calls and _is_irrecoverable(constraint.formula):
+                    prior = verify_trace(prefix_metrics, [constraint],
+                                         partial_trace=True)
+                    if prior.get("compliance_label") not in ("FULL", "N/A"):
+                        self._already_violated += 1
+                        continue
                 severity = self._severities.get(constraint.name, self._default_severity)
                 per_c = result.get("constraints", [{}])[0]
                 detail = per_c.get("detail") or per_c.get("reason") or "constraint violated"
