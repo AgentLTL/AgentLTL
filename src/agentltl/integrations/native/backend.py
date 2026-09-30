@@ -136,6 +136,12 @@ class NativeOpenAIAgent:
         # liveness obligation unmet. 0 is off and is the default, so an existing
         # caller is byte-identical. See ConstraintEnforcer.check_termination.
         max_termination_nudges: int = 0,
+        # Shell tools whose command line is enforced call by call: maps the tool name
+        # to the argument holding the command line, e.g. {"bash": "command"}. Such a
+        # call is translated into structured calls (`git_push`, `rm`, ...) by the
+        # optional `cli-to-tools` package, and constraints are written over those.
+        # `None` is off and is the default, so an existing caller is byte-identical.
+        shell_tools: Optional[Dict[str, str]] = None,
         mcp_servers: Optional[Dict[str, Any]] = None,
         _skip_runtime_safety_check: bool = False,
         **_ignored: Any,
@@ -198,7 +204,15 @@ class NativeOpenAIAgent:
                 default_headers=default_headers or None,
             )
 
-        self._enforcer = ConstraintEnforcer(
+        self._shell_tools: Dict[str, str] = dict(shell_tools or {})
+        enforcer_cls: Any = ConstraintEnforcer
+        enforcer_kwargs: Dict[str, Any] = {}
+        if self._shell_tools:
+            from agentltl.integrations.cli import CliConstraintEnforcer
+            enforcer_cls = CliConstraintEnforcer
+            enforcer_kwargs["shell_tools"] = self._shell_tools
+        self._enforcer = enforcer_cls(
+            **enforcer_kwargs,
             constraints=constraints,
             constraint_severities=constraint_severities,
             default_severity=default_severity,
@@ -348,7 +362,7 @@ class NativeOpenAIAgent:
                         "arguments": args, "id": tc.id,
                         "tool_result": result_str, "action_output": None,
                     }
-                    turn_tool_calls.append(call_record)
+                    turn_tool_calls.extend(self._expand_shell_call(call_record))
 
                 # A generation carrying a MIX counts as productive: the agent got
                 # work done, and only a turn where every call was refused is one we
@@ -476,6 +490,30 @@ class NativeOpenAIAgent:
         except Exception as e:  # return error as observation so the model can recover
             return f"ERROR: {type(e).__name__}: {e}"
         return result if isinstance(result, str) else json.dumps(result, default=str)
+
+    def _expand_shell_call(self, record: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Return the trace records for an executed call.
+
+        A shell tool call becomes one record per structured call of its command
+        line, so the emitted trace matches what the enforcer evaluated and
+        ``verify_trace`` needs no adaptation. Any other call is returned as is.
+
+        The calls of a command line run one after another, unlike parallel tool
+        calls of one generation, so each gets its own fractional ``step`` inside
+        the generation (3, 3.33, 3.67): the evaluator's step-boundary rule then
+        sees them as ordered. ``model_step`` keeps the generation index.
+        """
+        if record["tool_name"] not in self._shell_tools:
+            return [record]
+        from agentltl.integrations.cli import expand_tool_calls
+        expanded = expand_tool_calls(
+            [record], translator=self._enforcer._translator, shell_tools=self._shell_tools,
+        )
+        step = record["step"]
+        return [
+            {**record, **sub, "step": step + i / len(expanded), "model_step": step}
+            for i, sub in enumerate(expanded)
+        ]
 
     def _build_metrics(
         self,

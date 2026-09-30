@@ -37,6 +37,9 @@ pip install "agentltl[smolagents]"
 
 # With LangChain runtime enforcement
 pip install "agentltl[langchain]"
+
+# With command-line (bash tool) enforcement, native backend
+pip install "agentltl[native,cli]"
 ```
 
 ---
@@ -404,6 +407,39 @@ result = agent.run("do the task")
 # result["metrics"]["run_status"]  → "completed" | "stopped"
 ```
 
+### Shell tools (command lines as tool calls)
+
+An agent that works through one `bash(command=...)` tool is opaque to constraints: every
+call has the same name. With the `cli` extra, the native backend translates each command
+line into structured calls (via [cli-to-tools](https://github.com/lailanelkoussy/cli-to-tools))
+and enforces constraints over those:
+
+```python
+from agentltl import AgentWithConstraints, Before, CalledWith, Constraint, Globally, Not
+
+agent = AgentWithConstraints(
+    tools=[bash_tool],
+    constraints=[
+        Constraint("commit_before_push", Before("git_commit", "git_push")),
+        Constraint("no_force_push", Globally(Not(CalledWith("git_push", {"force": True})))),
+    ],
+    backend="native",
+    shell_tools={"bash": "command"},   # tool name -> argument holding the command line
+)
+```
+
+- `git push && git commit -m x` is checked as `git_push` then `git_commit`, in order. If any
+  call of a chain is blocked, the whole command line is rejected and nothing runs.
+- Command lines that cannot be analysed (loops, `eval`, background jobs, dynamic command
+  names) are blocked with feedback asking the model to rephrase.
+- `metrics["tool_calls"]` holds the structured calls, so `verify_trace` works unchanged.
+  The calls of one command line are sequential, so each gets a fractional `step` within
+  its generation (`model_step` keeps the generation index).
+- Other tools are unaffected, and `shell_tools=None` (the default) changes nothing.
+
+`agentltl.integrations.cli` also exports `CliConstraintEnforcer` (a drop-in
+`ConstraintEnforcer`) and `expand_tool_calls` (rewrite a recorded trace post hoc).
+
 ### ToolCallingAgentWithConstraints (smolagents low-level)
 
 The low-level smolagents integration extends `ToolCallingAgent` to check constraints
@@ -684,6 +720,7 @@ cannot cause spurious mid-run terminations) but still appear in
 | `examples/04_loop_termination_agent.py` | Polling loop compliance with `CalledNTimes` + `Predicate` |
 | `examples/05_fan_out_fan_in_agent.py` | Fan-out/fan-in with `AllBefore` gate |
 | `examples/06_mcp_tools_agent.py` | `AgentWithAdditionalTools` with an inline MCP server; multi-server and mixed local+MCP patterns |
+| `examples/07_shell_tool_constraints.py` | Constraints over a `bash` tool's command lines (`agentltl[cli]`), no LLM required |
 
 Run any example:
 

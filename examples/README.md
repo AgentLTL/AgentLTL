@@ -7,6 +7,7 @@
 | `03_linear_chain_agent.py` | Yes | A→B→C ordering with `AgentWithConstraints`; shows both `HARD_STOP` and `TOLERATE` severities |
 | `04_loop_termination_agent.py` | Yes | Polling loop with `AgentWithAdditionalTools` + post-hoc `verify_trace()`; shows how to swap to runtime enforcement |
 | `05_fan_out_fan_in_agent.py` | Yes | Fan-out/fan-in gate with `AllBefore`; post-hoc verification + failure case |
+| `07_shell_tool_constraints.py` | No | Constraints over a `bash` tool's command lines via `shell_tools` on the native backend (needs `agentltl[cli]`) |
 | `06_mcp_tools_agent.py` | Yes | `AgentWithAdditionalTools` connecting to an inline `FastMCP` server via the `mcp_servers` dict; shows multi-server and mixed local+MCP patterns |
 
 ## Running examples

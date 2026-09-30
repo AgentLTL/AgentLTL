@@ -240,6 +240,9 @@ class AgentWithConstraints:
                        a warning for the langchain backend)
     system_prompt    – optional system prompt (langchain backend; ignored
                        by smolagents unless added to the task string)
+    shell_tools      – ``{tool name: command-line argument}`` for shell tools
+                       enforced call by call (native only; needs
+                       ``agentltl[cli]``). See ``agentltl.integrations.cli``.
 
     Backend selection
     -----------------
@@ -273,7 +276,10 @@ class AgentWithConstraints:
         strict_runtime_safety: bool = False,
         base_url: Optional[str] = None,
         backend: str = "smolagents",
+        shell_tools: Optional[Dict[str, str]] = None,
     ) -> None:
+        if shell_tools and backend != "native":
+            raise ValueError("shell_tools is only supported with backend='native'.")
         check_runtime_safety_or_warn(
             constraints or [],
             constraint_severities,
@@ -336,6 +342,7 @@ class AgentWithConstraints:
                 model_seed=model_seed,
                 model_instance=model_instance,
                 system_prompt=system_prompt,
+                shell_tools=shell_tools,
                 _skip_runtime_safety_check=True,
             )
         else:
@@ -412,6 +419,9 @@ class MultiTurnAgent:
         # historical one-at-a-time behaviour; the harness raises it so a call with
         # several wrong fields does not cost one round trip per field.
         nudge_max: int = 1,
+        # {tool name: command-line argument} for shell tools enforced call by call.
+        # Needs `agentltl[cli]`. None is off. See agentltl.integrations.cli.
+        shell_tools: Optional[Dict[str, str]] = None,
         strict_runtime_safety: bool = False,
         backend: str = "native",
         reviewer_config: Optional[Any] = None,
@@ -447,6 +457,7 @@ class MultiTurnAgent:
             soft_block_mode=soft_block_mode,
             max_consecutive_soft_attempts=max_consecutive_soft_attempts,
             nudge_max=nudge_max,
+            shell_tools=shell_tools,
             _skip_runtime_safety_check=True,
         )
         # Inference-time reviewer ("Reinforced Agent"): when a reviewer_config is

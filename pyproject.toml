@@ -38,6 +38,9 @@ langchain = [
 native = [
     "openai>=1.0",
 ]
+cli = [
+    "cli-to-tools @ git+https://github.com/lailanelkoussy/cli-to-tools.git",
+]
 dev = [
     "pytest>=7.0",
     "ruff>=0.4",
