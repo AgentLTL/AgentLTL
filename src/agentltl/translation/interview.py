@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-agentltl/openpred/interview.py -- G4b. Ask the model for the obligations the RULES could not state.
+agentltl/translation/interview.py -- G4b. Ask the model for the obligations the RULES could not state.
 
 ===============================================================================
 `genv2/emit.py` states what its rules cover. Whatever it emits nothing for is a GAP,
@@ -49,7 +49,7 @@ uncalled tool, and unevaluable passes. The guard would be a second place validat
 the same fact, and validating in two places is exactly how `bind_slots` came to
 re-resolve what the interview had already resolved and drop the window. Vacuity is
 recorded as `vacuous_if_absent` so `compliance.active_score` still excludes dormant
-constraints, and `tests/test_openpred.py` pins that an absent tool passes.
+constraints, and `tests/test_translation.py` pins that an absent tool passes.
 ===============================================================================
 """
 from __future__ import annotations

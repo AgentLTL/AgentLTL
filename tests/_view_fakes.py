@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Test-only stand-ins for the harness's task types. They exist to show that
-agentltl.openpred depends on the STRUCTURE of a view (see openpred._protocols), not on
+agentltl.translation depends on the STRUCTURE of a view (see translation._protocols), not on
 any benchmark package."""
 from __future__ import annotations
 

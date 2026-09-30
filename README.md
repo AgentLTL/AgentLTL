@@ -301,7 +301,7 @@ The compliance score is `1 − (2.0 + 2.0 + 1.0) / (2.0 + 2.0 + 1.0) = 0.00` bec
 
 ---
 
-## Open predicates (`agentltl.openpred`)
+## Open predicates (`agentltl.translation`)
 
 Some obligations are not a fixed tool or a fixed value -- "the fuel amount must not
 exceed `tankCapacity - fuelLevel`", where both figures come from an earlier call's
@@ -311,13 +311,13 @@ against what the agent could see, and interprets it, so a malformed or ungrounde
 expression is rejected with a reason instead of being trusted.
 
 ```python
-from agentltl.openpred import expr, library
+from agentltl.translation import expr, library
 
 pred = expr.build(ast, {"Predicate": Predicate})   # -> an ordinary agentltl Predicate
 ```
 
 Three-valued by design: an unreadable tool result is *unevaluable* and passes, never a
-violation. `agentltl.openpred.interview` drives the model-facing half with an injected
+violation. `agentltl.translation.interview` drives the model-facing half with an injected
 OpenAI-shaped client (`chat_fn=`) and precomputed gaps. Nothing here imports `openai`.
 
 ## FOLTL Formula Reference

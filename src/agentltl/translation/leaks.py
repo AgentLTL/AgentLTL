@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-agentltl/openpred/leaks.py -- the leak gate's THIRD literal location.
+agentltl/translation/leaks.py -- the leak gate's THIRD literal location.
 
 `assemble.find_leaks` audits every literal in a spec against what the agent can see.
 It reaches them through `assemble._literals`, which walks two places:
@@ -16,7 +16,7 @@ pass.
 
 An open predicate's `const` terms are a third such location, and they arrive with
 blocking enabled from the first run. So this lands WITH the grammar rather than after
-it, and `test_openpred_leaks.py` pins that `find_leaks` actually reaches them --
+it, and `test_translation_leaks.py` pins that `find_leaks` actually reaches them --
 because the failure mode here is not an error, it is a clean report.
 
 Note the division of labour. `expr.validate` rejects a const whose SPAN is not in the

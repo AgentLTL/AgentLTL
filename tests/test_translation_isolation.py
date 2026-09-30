@@ -27,7 +27,7 @@ def _imported_modules(path: Path):
 
 def test_no_module_in_the_moved_set_imports_the_harness():
     moved = [SRC / "matching.py", SRC / "relative.py", SRC / "paramspec.py",
-             *sorted((SRC / "openpred").glob("*.py"))]
+             *sorted((SRC / "translation").glob("*.py"))]
     bad = {p.name: m for p in moved for m in _imported_modules(p)
            if m.split(".")[0] in FORBIDDEN}
     assert not bad, f"harness/vendor imports crept into agentltl: {bad}"
@@ -38,7 +38,7 @@ def test_relative_imports_resolve_to_modules_that_exist_in_agentltl():
     scan and fails only when the function runs -- which is how this was found."""
     bad = []
     for p in [SRC / "matching.py", SRC / "relative.py", SRC / "paramspec.py",
-              *sorted((SRC / "openpred").glob("*.py"))]:
+              *sorted((SRC / "translation").glob("*.py"))]:
         for node in ast.walk(ast.parse(p.read_text())):
             if isinstance(node, ast.ImportFrom) and node.level and node.module:
                 base = p.parent
@@ -51,13 +51,13 @@ def test_relative_imports_resolve_to_modules_that_exist_in_agentltl():
     assert not bad, bad
 
 
-def test_importing_openpred_needs_no_openai_and_no_harness():
+def test_importing_translation_needs_no_openai_and_no_harness():
     """Run in a fresh interpreter with `openai` made un-importable, so the check
     cannot pass merely because it was already imported by an earlier test."""
     code = (
         "import sys; sys.modules['openai'] = None\n"
-        "import agentltl, agentltl.openpred as o\n"
-        "from agentltl.openpred import expr, library, leaks, interview\n"
+        "import agentltl, agentltl.translation as o\n"
+        "from agentltl.translation import expr, library, leaks, interview, gaps, pipeline\n"
         "bad = [m for m in sys.modules if m.split('.')[0] in "
         f"{FORBIDDEN[:-1]!r}]\n"
         "assert not bad, bad\n"

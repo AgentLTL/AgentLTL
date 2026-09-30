@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-agentltl/openpred/expr.py -- open predicates: composable, deterministic, boolean-valued.
+agentltl/translation/expr.py -- open predicates: composable, deterministic, boolean-valued.
 
 ===============================================================================
 WHY THIS EXISTS

@@ -18,7 +18,7 @@ import json
 import pytest
 
 from ._view_fakes import AgentView, ToolSchema, UserTurn
-from agentltl.openpred import expr as E
+from agentltl.translation import expr as E
 
 
 # ── fixtures: real tools, real trace shapes ─────────────────────────────────

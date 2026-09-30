@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from agentltl.openpred import library as L
-from agentltl.openpred import expr as X
+from agentltl.translation import library as L
+from agentltl.translation import expr as X
 
 TASK5 = ("Check patient S6315806's last serum magnesium level within last 24 hours. "
          "If low, then order replacement IV magnesium according to dosing "

@@ -2,7 +2,7 @@
 """The three LLM helpers the interview needs, and nothing that reads the environment.
 
 `chat` takes an OpenAI-shaped client (anything with `.chat.completions.create`), so
-`import agentltl.openpred` never requires `openai`. Endpoint, credentials and any
+`import agentltl.translation` never requires `openai`. Endpoint, credentials and any
 provider-specific request options belong to the caller: pass `extra_body` /
 `extra_headers` rather than this module guessing them.
 """

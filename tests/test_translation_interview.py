@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agentltl.openpred import interview as IV
+from agentltl.translation import interview as IV
 from ._view_fakes import AgentView, ToolSchema, UserTurn
 
 VIEW = AgentView(
