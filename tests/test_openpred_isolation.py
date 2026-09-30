@@ -33,6 +33,24 @@ def test_no_module_in_the_moved_set_imports_the_harness():
     assert not bad, f"harness/vendor imports crept into agentltl: {bad}"
 
 
+def test_relative_imports_resolve_to_modules_that_exist_in_agentltl():
+    """A `from .compile import x` copied from the harness passes an absolute-import
+    scan and fails only when the function runs -- which is how this was found."""
+    bad = []
+    for p in [SRC / "matching.py", SRC / "relative.py", SRC / "paramspec.py",
+              *sorted((SRC / "openpred").glob("*.py"))]:
+        for node in ast.walk(ast.parse(p.read_text())):
+            if isinstance(node, ast.ImportFrom) and node.level and node.module:
+                base = p.parent
+                for _ in range(node.level - 1):
+                    base = base.parent
+                rel = Path(*node.module.split("."))
+                if not ((base / rel).with_suffix(".py").exists()
+                        or (base / rel / "__init__.py").exists()):
+                    bad.append(f"{p.name}: from {'.' * node.level}{node.module}")
+    assert not bad, bad
+
+
 def test_importing_openpred_needs_no_openai_and_no_harness():
     """Run in a fresh interpreter with `openai` made un-importable, so the check
     cannot pass merely because it was already imported by an earlier test."""

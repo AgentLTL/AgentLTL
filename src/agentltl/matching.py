@@ -28,6 +28,20 @@ _TRUE = {"true", "yes", "1"}
 _FALSE = {"false", "no", "0"}
 
 
+
+def _scalars(obj: Any, out: List[str]) -> None:
+    """Every leaf of a nested result, rendered as a string, appended to `out`."""
+    if obj is None:
+        return
+    if isinstance(obj, dict):
+        for v in obj.values():
+            _scalars(v, out)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            _scalars(v, out)
+    else:
+        out.append(str(obj))
+
 def _unquote(s: str) -> str:
     s = s.strip()
     while len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
@@ -331,10 +345,6 @@ def numbers_from_output(consumers, arg: str, producers, A: dict,
     at the point it enters, before anything can build on it. The credit is inductive,
     and so is the refusal.
     """
-    # _scalars lives in compile.py; import inside the function because compile
-    # imports this module (module-level import would be circular).
-    from .compile import _scalars
-
     Predicate = A["Predicate"]
     cons, prods = list(consumers), list(producers)
     said = {str(x) for x in (stated or [])}
