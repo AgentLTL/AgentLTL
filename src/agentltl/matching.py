@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-genv2/matching.py
+agentltl/matching.py
 ===============================================================================
 Format-tolerant argument matching.
 

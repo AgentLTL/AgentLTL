@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-genv2/relative.py -- predicates whose expected value is RELATIVE to the trace.
+agentltl/relative.py -- predicates whose expected value is RELATIVE to the trace.
 
 Kept apart from matching.py on purpose: that module is about whether two values are
 the same thing written differently, these are about a value the spec cannot know at
