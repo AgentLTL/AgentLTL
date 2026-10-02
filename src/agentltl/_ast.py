@@ -92,6 +92,22 @@ class Called(Formula):
 
 
 @dataclass(frozen=True)
+class Now(Formula):
+    """True iff the call AT THE CURRENT POSITION is *tool*.
+
+    The step-local counterpart of :class:`Called`, which is a fact about the
+    whole trace (``called("x")`` holds at every position once x appears
+    anywhere). Inside temporal operators that is rarely what a rule means:
+    ``G(called("deploy") -> X(...))`` fires at every step of a run that
+    deploys once. ``G(now("deploy") -> X(...))`` fires at the deploy step only.
+    """
+    tool: str
+
+    def __str__(self) -> str:
+        return f'now("{self.tool}")'
+
+
+@dataclass(frozen=True)
 class CalledWith(Formula):
     """True iff *tool* was called with arguments matching *expected_args*.
 

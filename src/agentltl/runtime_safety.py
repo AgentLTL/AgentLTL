@@ -64,6 +64,7 @@ from ._ast import (
     InstanceBefore,
     Next,
     Not,
+    Now,
     Or,
     Predicate,
     Release,
@@ -164,6 +165,10 @@ def classify_runtime_safety(formula: Formula) -> _Classification:
     # ── Atomic propositions ──────────────────────────────────────────────
     if isinstance(formula, Called):
         return _Classification.unsafe()
+
+    if isinstance(formula, Now):
+        # Fixed at its position once that call is made: decidable either way.
+        return _Classification.safe()
 
     if isinstance(formula, CalledNTimes):
         if formula.op in ("<=", "<"):

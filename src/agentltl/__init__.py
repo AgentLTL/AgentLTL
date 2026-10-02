@@ -51,6 +51,7 @@ from ._ast import (
     Formula,
     # Atomic propositions
     Called,
+    Now,
     CalledWith,
     CalledWithResult,
     CalledNTimes,
@@ -135,7 +136,7 @@ __version__ = "0.1.0"
 __all__ = [
     # AST
     "Formula",
-    "Called", "CalledWith", "CalledWithResult", "CalledNTimes",
+    "Called", "Now", "CalledWith", "CalledWithResult", "CalledNTimes",
     "Before", "After", "AllBefore", "BranchCalled",
     "InstanceBefore", "CalledInOrder", "WithinSteps",
     "Globally", "Eventually", "Next", "Until", "WeakUntil", "Release",

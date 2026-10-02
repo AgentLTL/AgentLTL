@@ -20,6 +20,7 @@ Supported grammar (case-insensitive keywords)::
                | '(' formula ')'
     function_call
              ::= 'called'       '(' STRING ')'
+               | 'now'          '(' STRING ')'   -- the call at this step
                | 'before'       '(' STRING ',' STRING ')'
                | 'after'        '(' STRING ',' STRING ')'
                | 'eventually'   '(' STRING ')'
@@ -53,6 +54,7 @@ from ._ast import (
     Implies,
     Next,
     Not,
+    Now,
     Or,
     Release,
     Until,
@@ -268,6 +270,11 @@ class _Parser:
             tool = self._expect(_TokenType.STRING).value
             self._expect(_TokenType.RPAREN)
             return Called(tool)
+
+        if name == "now":
+            tool = self._expect(_TokenType.STRING).value
+            self._expect(_TokenType.RPAREN)
+            return Now(tool)
 
         if name == "before":
             a = self._expect(_TokenType.STRING).value

@@ -19,6 +19,10 @@ adopt the *weak* finite-trace semantics common in runtime verification:
   (vacuously true on the empty suffix).
 * **X φ** is true iff a next position exists *and* φ holds there.
   (X φ is *false* when the trace has ended — safety-oriented choice.)
+  On a *partial* trace (``partial_trace=True``, the run is still going) a
+  missing next position means "not decided yet", and X φ is true: refusing
+  the current call because its successor has not happened yet would make
+  every X-guarded call impossible.
 * **φ U ψ** (strong until) requires ψ to eventually hold.
 * **φ W ψ** (weak until) is satisfied if ψ never occurs but φ holds forever.
 * **φ R ψ** is the dual of Until.
@@ -32,7 +36,12 @@ First-order quantifier semantics
 
 Atomic propositions (:class:`Called`, :class:`Before`, etc.) are evaluated
 against the *full* trace regardless of the current suffix position, since
-they express global facts about the run.
+they express global facts about the run. :class:`Now` is the exception: it
+looks at the call at the current position only.
+
+``partial_trace`` is passed down through every connective, temporal operator
+and quantifier, so an atom nested in ``G(...)`` gets the same trigger
+semantics as one at the top level.
 """
 
 from __future__ import annotations
@@ -61,6 +70,7 @@ from ._ast import (
     InstanceBefore,
     Next,
     Not,
+    Now,
     Or,
     Predicate,
     Release,
@@ -134,14 +144,17 @@ class LTLEvaluator:
         """
         # ── First-order quantifiers ──────────────────────────────────────────
         if isinstance(formula, ForAll):
-            return self._eval_forall(formula, trace, position, metrics)
+            return self._eval_forall(formula, trace, position, metrics, partial_trace=partial_trace)
 
         if isinstance(formula, Exists):
-            return self._eval_exists(formula, trace, position, metrics)
+            return self._eval_exists(formula, trace, position, metrics, partial_trace=partial_trace)
 
         # ── Atomic propositions ──────────────────────────────────────────────
         if isinstance(formula, Called):
             return self._eval_called(formula, trace)
+
+        if isinstance(formula, Now):
+            return self._eval_now(formula, trace, position)
 
         if isinstance(formula, CalledWith):
             return self._eval_called_with(formula, trace)
@@ -174,42 +187,42 @@ class LTLEvaluator:
             return self._eval_within_steps(formula, trace)
 
         if isinstance(formula, Predicate):
-            return self._eval_predicate(formula, trace, position, metrics)
+            return self._eval_predicate(formula, trace, position, metrics, partial_trace=partial_trace)
 
         if isinstance(formula, AtPosition):
-            return self._eval_at_position(formula, trace, metrics)
+            return self._eval_at_position(formula, trace, metrics, partial_trace=partial_trace)
 
         # ── Logical connectives ──────────────────────────────────────────────
         if isinstance(formula, Not):
-            return self._eval_not(formula, trace, position, metrics)
+            return self._eval_not(formula, trace, position, metrics, partial_trace=partial_trace)
 
         if isinstance(formula, And):
-            return self._eval_and(formula, trace, position, metrics)
+            return self._eval_and(formula, trace, position, metrics, partial_trace=partial_trace)
 
         if isinstance(formula, Or):
-            return self._eval_or(formula, trace, position, metrics)
+            return self._eval_or(formula, trace, position, metrics, partial_trace=partial_trace)
 
         if isinstance(formula, Implies):
-            return self._eval_implies(formula, trace, position, metrics)
+            return self._eval_implies(formula, trace, position, metrics, partial_trace=partial_trace)
 
         # ── Temporal operators ───────────────────────────────────────────────
         if isinstance(formula, Globally):
-            return self._eval_globally(formula, trace, position, metrics)
+            return self._eval_globally(formula, trace, position, metrics, partial_trace=partial_trace)
 
         if isinstance(formula, Eventually):
-            return self._eval_eventually(formula, trace, position, metrics)
+            return self._eval_eventually(formula, trace, position, metrics, partial_trace=partial_trace)
 
         if isinstance(formula, Next):
-            return self._eval_next(formula, trace, position, metrics)
+            return self._eval_next(formula, trace, position, metrics, partial_trace=partial_trace)
 
         if isinstance(formula, Until):
-            return self._eval_until(formula, trace, position, metrics)
+            return self._eval_until(formula, trace, position, metrics, partial_trace=partial_trace)
 
         if isinstance(formula, WeakUntil):
-            return self._eval_weak_until(formula, trace, position, metrics)
+            return self._eval_weak_until(formula, trace, position, metrics, partial_trace=partial_trace)
 
         if isinstance(formula, Release):
-            return self._eval_release(formula, trace, position, metrics)
+            return self._eval_release(formula, trace, position, metrics, partial_trace=partial_trace)
 
         raise TypeError(f"Unknown formula type: {type(formula).__name__}")
 
@@ -222,6 +235,14 @@ class LTLEvaluator:
             idx = trace.first_index(f.tool)
             return EvalResult(True, f'"{f.tool}" was called (call #{idx + 1}).', f)
         return EvalResult(False, f'"{f.tool}" was never called.', f)
+
+    def _eval_now(self, f: Now, trace: Trace, pos: int) -> EvalResult:
+        call = trace.at(pos)
+        if call is None:
+            return EvalResult(False, f'No call at position {pos}.', f)
+        if call.name == f.tool:
+            return EvalResult(True, f'Call #{pos + 1} is "{f.tool}".', f)
+        return EvalResult(False, f'Call #{pos + 1} is "{call.name}", not "{f.tool}".', f)
 
     def _eval_called_with(self, f: CalledWith, trace: Trace) -> EvalResult:
         matches = trace.calls_with(f.tool, f.expected_args)
@@ -521,7 +542,7 @@ class LTLEvaluator:
             f,
         )
 
-    def _eval_predicate(self, f: Predicate, trace: Trace, position: int, metrics: Optional[Dict[str, Any]] = None) -> EvalResult:
+    def _eval_predicate(self, f: Predicate, trace: Trace, position: int, metrics: Optional[Dict[str, Any]] = None, *, partial_trace: bool = False) -> EvalResult:
         try:
             try:
                 result = f.fn(trace, position, metrics)
@@ -535,22 +556,24 @@ class LTLEvaluator:
             return EvalResult(passed, detail, f)
         return EvalResult(bool(result), f'Predicate "{f.description}" returned {result}.', f)
 
-    def _eval_at_position(self, f: AtPosition, trace: Trace, metrics: Optional[Dict[str, Any]] = None) -> EvalResult:
+    def _eval_at_position(self, f: AtPosition, trace: Trace, metrics: Optional[Dict[str, Any]] = None, *, partial_trace: bool = False) -> EvalResult:
         if f.index >= len(trace) or f.index < 0:
             return EvalResult(False, f"Position {f.index} is out of range (trace length {len(trace)}).", f)
-        return self.evaluate(f.operand, trace, f.index, metrics=metrics)
+        return self.evaluate(f.operand, trace, f.index, metrics=metrics, partial_trace=partial_trace)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Logical connectives
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _eval_not(self, f: Not, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None) -> EvalResult:
+    def _eval_not(self, f: Not, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None, *, partial_trace: bool = False) -> EvalResult:
+        # Negative position: trigger semantics ("not violated yet") would read as
+        # "already violated" once negated, so the operand is judged strictly.
         inner = self.evaluate(f.operand, trace, pos, metrics=metrics)
         return EvalResult(not inner.passed, f"NOT({inner.detail})", f)
 
-    def _eval_and(self, f: And, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None) -> EvalResult:
-        left = self.evaluate(f.left, trace, pos, metrics=metrics)
-        right = self.evaluate(f.right, trace, pos, metrics=metrics)
+    def _eval_and(self, f: And, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None, *, partial_trace: bool = False) -> EvalResult:
+        left = self.evaluate(f.left, trace, pos, metrics=metrics, partial_trace=partial_trace)
+        right = self.evaluate(f.right, trace, pos, metrics=metrics, partial_trace=partial_trace)
         passed = left.passed and right.passed
         if passed:
             detail = f"Both satisfied: [{left.detail}] AND [{right.detail}]"
@@ -562,9 +585,9 @@ class LTLEvaluator:
             detail = f"Right failed: {right.detail}"
         return EvalResult(passed, detail, f)
 
-    def _eval_or(self, f: Or, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None) -> EvalResult:
-        left = self.evaluate(f.left, trace, pos, metrics=metrics)
-        right = self.evaluate(f.right, trace, pos, metrics=metrics)
+    def _eval_or(self, f: Or, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None, *, partial_trace: bool = False) -> EvalResult:
+        left = self.evaluate(f.left, trace, pos, metrics=metrics, partial_trace=partial_trace)
+        right = self.evaluate(f.right, trace, pos, metrics=metrics, partial_trace=partial_trace)
         passed = left.passed or right.passed
         if passed:
             detail = f"At least one satisfied: [{left.detail}] OR [{right.detail}]"
@@ -572,11 +595,11 @@ class LTLEvaluator:
             detail = f"Neither satisfied: [{left.detail}] OR [{right.detail}]"
         return EvalResult(passed, detail, f)
 
-    def _eval_implies(self, f: Implies, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None) -> EvalResult:
-        left = self.evaluate(f.left, trace, pos, metrics=metrics)
+    def _eval_implies(self, f: Implies, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None, *, partial_trace: bool = False) -> EvalResult:
+        left = self.evaluate(f.left, trace, pos, metrics=metrics)  # negative position, see _eval_not
         if not left.passed:
             return EvalResult(True, f"Antecedent false — implication vacuously true. ({left.detail})", f)
-        right = self.evaluate(f.right, trace, pos, metrics=metrics)
+        right = self.evaluate(f.right, trace, pos, metrics=metrics, partial_trace=partial_trace)
         if right.passed:
             return EvalResult(True, f"Antecedent true and consequent satisfied: {right.detail}", f)
         return EvalResult(False, f"Antecedent true but consequent failed: {right.detail}", f)
@@ -585,33 +608,35 @@ class LTLEvaluator:
     # Temporal operators
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _eval_globally(self, f: Globally, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None) -> EvalResult:
+    def _eval_globally(self, f: Globally, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None, *, partial_trace: bool = False) -> EvalResult:
         for i in range(pos, len(trace)):
-            r = self.evaluate(f.operand, trace, i, metrics=metrics)
+            r = self.evaluate(f.operand, trace, i, metrics=metrics, partial_trace=partial_trace)
             if not r.passed:
                 return EvalResult(False, f"G violated at position {i}: {r.detail}", f)
         return EvalResult(True, "G holds at all positions.", f)
 
-    def _eval_eventually(self, f: Eventually, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None) -> EvalResult:
+    def _eval_eventually(self, f: Eventually, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None, *, partial_trace: bool = False) -> EvalResult:
         for i in range(pos, len(trace)):
-            r = self.evaluate(f.operand, trace, i, metrics=metrics)
+            r = self.evaluate(f.operand, trace, i, metrics=metrics, partial_trace=partial_trace)
             if r.passed:
                 return EvalResult(True, f"F satisfied at position {i}: {r.detail}", f)
         return EvalResult(False, f"F not satisfied: {f.operand} never held from position {pos} onward.", f)
 
-    def _eval_next(self, f: Next, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None) -> EvalResult:
+    def _eval_next(self, f: Next, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None, *, partial_trace: bool = False) -> EvalResult:
         nxt = pos + 1
         if nxt >= len(trace):
+            if partial_trace:
+                return EvalResult(True, "X not decided yet: no next call has been made.", f)
             return EvalResult(False, f"X cannot be evaluated: no next position (trace ended at {len(trace)}).", f)
-        r = self.evaluate(f.operand, trace, nxt, metrics=metrics)
+        r = self.evaluate(f.operand, trace, nxt, metrics=metrics, partial_trace=partial_trace)
         return EvalResult(r.passed, f"X at position {nxt}: {r.detail}", f)
 
-    def _eval_until(self, f: Until, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None) -> EvalResult:
+    def _eval_until(self, f: Until, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None, *, partial_trace: bool = False) -> EvalResult:
         for i in range(pos, len(trace)):
-            rhs = self.evaluate(f.right, trace, i, metrics=metrics)
+            rhs = self.evaluate(f.right, trace, i, metrics=metrics, partial_trace=partial_trace)
             if rhs.passed:
                 return EvalResult(True, f"Until satisfied: right side held at position {i}.", f)
-            lhs = self.evaluate(f.left, trace, i, metrics=metrics)
+            lhs = self.evaluate(f.left, trace, i, metrics=metrics, partial_trace=partial_trace)
             if not lhs.passed:
                 return EvalResult(
                     False,
@@ -620,20 +645,20 @@ class LTLEvaluator:
                 )
         return EvalResult(False, f"Until violated: right side never held (trace ended at position {len(trace)}).", f)
 
-    def _eval_weak_until(self, f: WeakUntil, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None) -> EvalResult:
+    def _eval_weak_until(self, f: WeakUntil, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None, *, partial_trace: bool = False) -> EvalResult:
         for i in range(pos, len(trace)):
-            rhs = self.evaluate(f.right, trace, i, metrics=metrics)
+            rhs = self.evaluate(f.right, trace, i, metrics=metrics, partial_trace=partial_trace)
             if rhs.passed:
                 return EvalResult(True, f"WeakUntil satisfied: right side held at position {i}.", f)
-            lhs = self.evaluate(f.left, trace, i, metrics=metrics)
+            lhs = self.evaluate(f.left, trace, i, metrics=metrics, partial_trace=partial_trace)
             if not lhs.passed:
                 return EvalResult(False, f"WeakUntil violated at position {i}: left side failed. {lhs.detail}", f)
         return EvalResult(True, "WeakUntil satisfied: left side held at all remaining positions.", f)
 
-    def _eval_release(self, f: Release, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None) -> EvalResult:
+    def _eval_release(self, f: Release, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]] = None, *, partial_trace: bool = False) -> EvalResult:
         for i in range(pos, len(trace)):
-            rhs = self.evaluate(f.right, trace, i, metrics=metrics)
-            lhs = self.evaluate(f.left, trace, i, metrics=metrics)
+            rhs = self.evaluate(f.right, trace, i, metrics=metrics, partial_trace=partial_trace)
+            lhs = self.evaluate(f.left, trace, i, metrics=metrics, partial_trace=partial_trace)
             if lhs.passed:
                 if rhs.passed:
                     return EvalResult(True, f"Release satisfied: both sides held at position {i}.", f)
@@ -655,7 +680,7 @@ class LTLEvaluator:
     # First-order quantifiers
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _eval_forall(self, f: ForAll, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]]) -> EvalResult:
+    def _eval_forall(self, f: ForAll, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]], *, partial_trace: bool = False) -> EvalResult:
         try:
             entities = f.domain(trace, metrics or {})
         except Exception as exc:
@@ -666,12 +691,12 @@ class LTLEvaluator:
 
         for entity in entities:
             concrete = substitute(f.body, {f.var: entity})
-            result = self.evaluate(concrete, trace, pos, metrics=metrics)
+            result = self.evaluate(concrete, trace, pos, metrics=metrics, partial_trace=partial_trace)
             if not result.passed:
                 return EvalResult(False, f"∀{f.var}: failed for {f.var}={entity!r}. {result.detail}", f)
         return EvalResult(True, f"∀{f.var}: holds for all {len(entities)} entities.", f)
 
-    def _eval_exists(self, f: Exists, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]]) -> EvalResult:
+    def _eval_exists(self, f: Exists, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]], *, partial_trace: bool = False) -> EvalResult:
         try:
             entities = f.domain(trace, metrics or {})
         except Exception as exc:
@@ -682,7 +707,7 @@ class LTLEvaluator:
 
         for entity in entities:
             concrete = substitute(f.body, {f.var: entity})
-            result = self.evaluate(concrete, trace, pos, metrics=metrics)
+            result = self.evaluate(concrete, trace, pos, metrics=metrics, partial_trace=partial_trace)
             if result.passed:
                 return EvalResult(True, f"∃{f.var}: satisfied for {f.var}={entity!r}. {result.detail}", f)
         return EvalResult(False, f"∃{f.var}: no entity satisfied the formula ({len(entities)} checked).", f)

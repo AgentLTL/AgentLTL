@@ -369,6 +369,19 @@ from agentltl import parse
 formula = parse('before("fetch", "save") & F(called("done"))')
 ```
 
+`called("x")` is a fact about the whole trace: once `x` appears anywhere, it holds at
+every position. To talk about the call at the current step, which is what you
+usually want under `G` and `X`, use `now("x")`:
+
+```python
+# deploy at most once: after a deploy step, no later step is a deploy
+once = parse('G(now("deploy") -> X(G(!now("deploy"))))')
+```
+
+While a run is in progress (`partial_trace=True`, which the runtime enforcer uses),
+`X φ` at the last call is "not decided yet" rather than false, so the call being
+checked is not refused just because nothing has followed it.
+
 ---
 
 ## Runtime Enforcement
