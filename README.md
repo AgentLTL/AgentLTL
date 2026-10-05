@@ -2,6 +2,10 @@
 
 **FOLTL constraint verification for LLM agent traces.**
 
+📖 **Documentation: [agentltl.github.io](https://agentltl.github.io)**, with the
+[API reference](https://agentltl.github.io/python/api/) and the
+[concepts](https://agentltl.github.io/concepts/) behind the formulas.
+
 AgentLTL provides a First-Order Linear Temporal Logic (FOLTL) engine for verifying that LLM agent tool-call traces comply with procedural constraints.  It supports both **post-hoc verification** (after a run completes) and **runtime enforcement** (pre-execution checking before each tool call, with `HARD_STOP`, `SOFT_BLOCK`, `BLOCK_AND_WARN`, `PERSISTENT_BLOCK`, and `TOLERATE` severity modes).
 
 ---
