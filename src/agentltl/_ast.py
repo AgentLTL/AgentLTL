@@ -500,7 +500,9 @@ class CallPattern:
     files that exist); :class:`ToolPattern` is the plain one.
 
     ``match(name, args)`` returns True, False, or None for "maybe": the call's arguments
-    are only known when it runs (``xargs rm``). ``bind(bindings)`` returns the pattern
+    are only known when it runs (``xargs rm``). A pattern whose ``match`` takes a third
+    argument also gets the recorded call (a ``ToolCall``: its ``result``, and ``raw`` with
+    the exit status a harness recorded as ``status``). ``bind(bindings)`` returns the pattern
     with quantifier variables (:class:`Var` values) replaced. ``tools`` names the tools it
     can match, for linting.
     """

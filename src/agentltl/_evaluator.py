@@ -49,7 +49,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from ._partial import PartialEvaluator, call_domain, call_predicate
+from ._partial import PartialEvaluator, call_domain, call_predicate, match_call
 from ._ast import (
     AllBefore,
     After,
@@ -532,7 +532,7 @@ class LTLEvaluator:
         call = trace.at(pos)
         if call is None:
             return EvalResult(False, f"No call at position {pos}.", f)
-        hit = f.pattern.match(call.name, call.args)
+        hit = match_call(f.pattern, call)
         if hit is None:
             return EvalResult(bool(f.maybe), f"Call #{pos + 1} ({call.name}) may match {f}.", f)
         return EvalResult(bool(hit), f"Call #{pos + 1} ({call.name}) "

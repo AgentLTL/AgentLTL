@@ -110,6 +110,25 @@ def is_past_only(f: Formula) -> bool:
     return False
 
 
+def match_call(pattern: Any, call: Any) -> Optional[bool]:
+    """``pattern.match(name, args)``, or ``(name, args, call)`` for a pattern that also reads
+    the recorded call (its result, its exit status in ``call.raw["status"]``)."""
+    fn = pattern.match
+    arity = getattr(fn, "__agentltl_arity__", None)
+    if arity is None:
+        try:
+            params = [p for p in inspect.signature(fn).parameters.values()
+                      if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+            arity = 3 if len(params) >= 3 else 2
+        except (TypeError, ValueError):
+            arity = 2
+        try:
+            fn.__func__.__agentltl_arity__ = arity
+        except AttributeError:
+            pass
+    return fn(call.name, call.args, call) if arity == 3 else fn(call.name, call.args)
+
+
 def call_domain(fn: Callable, trace: Trace, metrics: Optional[Dict], position: int) -> Any:
     """A quantifier's domain: ``(trace, metrics)``, or ``(trace, metrics, position)`` for a
     domain read at the position being judged (the values of the call there)."""
@@ -365,7 +384,7 @@ class PartialEvaluator:
         if call is None:
             return Value(PENDING, f"No call at position {pos} yet.")
         try:
-            hit = f.pattern.match(call.name, call.args)
+            hit = match_call(f.pattern, call)
         except Exception as exc:
             return Value(PFALSE, f"Pattern {f} raised {type(exc).__name__}: {exc}")
         describe = getattr(f.pattern, "describe", lambda: str(f.pattern))

@@ -214,3 +214,28 @@ class TestPastTimeRules:
         assert not enf.check("rm", {}).violation.uncertain
         d = enf.check("rm", {"unknown": True})
         assert d.action == "block" and d.violation.uncertain
+
+
+class TestPatternsSeeTheRecordedCall:
+    def test_a_rule_on_exit_status(self):
+        from agentltl import Implies, Matches, Once, Previous, ToolPattern
+
+        class Passed(ToolPattern):
+            def match(self, name, args, call):
+                return name in self.tools and call.raw.get("status") == 0
+
+        rule = Constraint("green-before-push", Globally(Implies(
+            Now("push"), Previous(Once(Matches(Passed("pytest")))))))
+        enf = enforcer(rule, default_severity=S.PERSISTENT_BLOCK)
+        enf.record_completed("pytest", status=1)
+        assert enf.check("push", {}).action == "block"
+        enf.record_completed("pytest", status=0)
+        assert enf.check("push", {}).allowed
+
+    def test_termination_nudges_can_be_allowed_again(self):
+        must = Constraint("tests-run", Called("pytest"), applies_to_final_answer=True)
+        enf = enforcer(must, default_severity=S.TOLERATE, max_termination_nudges=1)
+        assert enf.check_termination().action == "block"
+        assert enf.check_termination().allowed
+        enf.reset_termination_nudges()
+        assert enf.check_termination().action == "block"

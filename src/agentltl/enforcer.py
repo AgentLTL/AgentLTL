@@ -647,6 +647,11 @@ class Enforcer:
                       "step is genuinely not applicable here, say so explicitly and finish.")
         return Decision("block", unmet, feedback=feedback)
 
+    def reset_termination_nudges(self) -> None:
+        """Allow ``max_termination_nudges`` again: for a harness whose run is many turns,
+        each one a new chance to finish (a new user message, say)."""
+        self._termination_nudges = 0
+
     @property
     def termination_nudges(self) -> int:
         return self._termination_nudges
