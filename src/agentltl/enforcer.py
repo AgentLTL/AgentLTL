@@ -411,7 +411,9 @@ class Enforcer:
         try:
             for i, (name, args) in enumerate(calls):
                 pointer = self._last_blocked_call
-                decision = self.check(name, args, step_number)
+                # Enforcer.check, not self.check: a subclass may give check() another
+                # return type (ConstraintEnforcer) or expand the call (shell tools).
+                decision = Enforcer.check(self, name, args, step_number)
                 if not decision.allowed:
                     self._blocked_chain = key
                     decision.index = i
@@ -426,8 +428,7 @@ class Enforcer:
                         and not decision.override:
                     self._last_blocked_call = pointer
                 self._completed_tool_calls.append(
-                    {"tool_name": name, "arguments": dict(args or {}),
-                     "step": self._current_generation})
+                    {"tool_name": name, "arguments": dict(args or {})})
         finally:
             del self._completed_tool_calls[start:]
             self._prefix_cache_len = -1
@@ -523,8 +524,7 @@ class Enforcer:
         if not self._constraints:
             return []
         completed = self._completed_tool_calls
-        candidate = {"tool_name": tool_name, "arguments": tool_args,
-                     "step": self._current_generation}
+        candidate = {"tool_name": tool_name, "arguments": tool_args}
         metrics = {"tool_calls": completed + [candidate]}
         trace = Trace.from_metrics(metrics)
         self._constraint_checks += len(self._constraints)
@@ -582,8 +582,11 @@ class Enforcer:
         self.record_entry(entry)
 
     def record_entry(self, entry: Dict[str, Any]) -> None:
-        """Add a prepared trace entry (``tool_name``, ``arguments``, ...) that ran."""
-        entry.setdefault("step", self._current_generation)
+        """Add a prepared trace entry (``tool_name``, ``arguments``, ...) that ran.
+
+        An entry may carry ``step``, the agent step it ran in: ordering atoms then treat
+        calls of the same step as parallel (see ``Before``). The enforcer sets none
+        itself: calls of one command line share a generation but run in sequence."""
         self._completed_tool_calls.append(entry)
 
     # ── Termination ──────────────────────────────────────────────────────────
