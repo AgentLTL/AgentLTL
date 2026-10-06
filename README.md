@@ -382,9 +382,28 @@ usually want under `G` and `X`, use `now("x")`:
 once = parse('G(now("deploy") -> X(G(!now("deploy"))))')
 ```
 
-While a run is in progress (`partial_trace=True`, which the runtime enforcer uses),
-`X φ` at the last call is "not decided yet" rather than false, so the call being
-checked is not refused just because nothing has followed it.
+### Judging a run that isn't over
+
+While a run is in progress (`partial_trace=True`, which the runtime enforcer uses), a
+formula takes one of five values (`agentltl._partial`):
+
+| Value | Meaning |
+|---|---|
+| `FALSE` | violated, and no later call can repair it |
+| `PFALSE` | an obligation not met yet: `called("x")` before x runs |
+| `PENDING` | not triggered or not decided yet: `X φ` at the last call, `F φ`, `before(a, b)` before any b |
+| `PTRUE` | holds so far; a later call could still break it (`at most 2`) |
+| `TRUE` | holds, and nothing appended can change that |
+
+A call is refused when the value is below `PENDING`. `Not` mirrors the scale, `And`, `G`
+and `ForAll` take the minimum, `Or`, `F` and `Exists` the maximum. On a complete trace
+(scoring) the ordinary two-valued semantics apply.
+
+The enforcer refuses a call only for what **that call** newly breaks. Each failure carries
+*witnesses* (a position of `G`, a side of `And`, an entity of `ForAll`, a count); when all
+of them were already `FALSE` before the call, the call isn't refused for it. After a
+`BLOCK_AND_WARN` override of `G(now("deploy") -> X(G(!now("deploy"))))`, an unrelated `ls`
+goes through, and the next deploy is refused again.
 
 ---
 
@@ -542,55 +561,46 @@ and threshold, instructing the agent to take a fundamentally different approach.
 
 ## Runtime-safety classification
 
-Some FOLTL formulas express *unbounded liveness*: their violation cannot be
-detected at any finite trace prefix because the satisfying step could always
-arrive later.  `Eventually(Called("done"))` is the canonical example — at any
-mid-run position the agent might still call `done` on the next step, so the
-constraint is not yet refuted.  Pairing such a formula with `HARD_STOP`
-produces spurious terminations: the agent gets killed for not having
-satisfied a constraint that it might have satisfied later.
+Refusing a call needs a violation that is visible *now*. AgentLTL classifies every
+constraint from the values it can take on a partial trace (`reachable_values`, an abstract
+interpretation over the same five-valued algebra the enforcer uses, so the two agree):
 
-AgentLTL detects these mismatches statically.  When you build any of the
-constrained-agent classes, every constraint is classified as one of:
+- **`SAFE`**      — it only fails for good: every refusal points at a real violation
+  made by the refused call (`G(!now("x"))`, `CalledNTimes(t, n, "<=")`, `Before(a, b)`,
+  `WithinSteps(a, b, n)`).
+- **`UNSAFE`**    — it can fail while an obligation is open (`Called(t)`,
+  `CalledWith(...)`): a blocking severity refuses every call until something meets it.
+- **`INERT`**     — it can't fail before the run ends (`Eventually(...)`,
+  `CalledInOrder(...)`): a blocking severity never fires. Check it at termination
+  (`applies_to_final_answer=True` with `max_termination_nudges`) or bound it with
+  `WithinSteps`.
+- **`AMBIGUOUS`** — a `Predicate` that declared nothing, or an unknown node.
 
-- **`SAFE`**       — a violation is detectable at some finite prefix
-  (safety properties, bounded temporal properties, upper-bound counts).
-- **`UNSAFE`**     — cannot be falsified at any finite prefix.  Pairing
-  with a blocking severity (`HARD_STOP`, `SOFT_BLOCK`, or `PERSISTENT_BLOCK`)
-  will warn at registration time.  (`BLOCK_AND_WARN` is exempt because the
-  model can always override it.)
-- **`AMBIGUOUS`**  — the classifier cannot decide.  User-authored
-  `Predicate`s land here by default; the framework defers to the user.
+Pairing `UNSAFE` or `INERT` with a blocking severity (`HARD_STOP`, `SOFT_BLOCK` or
+`PERSISTENT_BLOCK`) warns at registration time. (`BLOCK_AND_WARN` is exempt: the model
+can always override it.)
 
-### Operator classification
+### Values each node can take
 
-| Operator                                    | Default classification | Notes |
-|---------------------------------------------|------------------------|-------|
-| `Called(tool)`                              | UNSAFE                 | Witness can arrive later. |
-| `CalledNTimes(tool, n, "<=" / "<")`         | SAFE                   | Upper bounds: exceeding is permanent. |
-| `CalledNTimes(tool, n, ">=" / ">" / "==")`  | UNSAFE                 | Counts can grow / equality breakable. |
-| `CalledNTimes(tool, 0, "==" / ">=")`        | SAFE                   | Forbidden-tool form: any call permanently violates `==`; `>=` is vacuously true. |
-| `Before(a, b)` / `After(a, b)`              | UNSAFE                 | Order undetermined until `b` appears. |
-| `AllBefore(tools, target)`                  | SAFE                   | Missing-tool-at-gate is permanent. |
-| `BranchCalled(correct, wrong)`              | SAFE                   | Wrong branch is a permanent violation. |
-| `CalledWith(...)` / `CalledWithResult(...)` | UNSAFE                 | Match could occur later. |
-| `CalledInOrder(tools)`                      | UNSAFE                 | Subsequence may complete later. |
-| `InstanceBefore(a, n, b, m)`                | UNSAFE                 | Bounded only when both counts saturate. |
-| `WithinSteps(a, b, n)`                      | SAFE                   | Canonical bounded liveness. |
-| `Predicate(fn, desc)`                       | AMBIGUOUS              | Pass `runtime_safe=True/False` to override. |
-| `Globally(phi)`                             | SAFE                   | `G` is the canonical safety operator. |
-| `Eventually(phi)`                           | UNSAFE                 | Canonical unbounded liveness. |
-| `Next(phi)`                                 | inherits `phi`         | One-step bounded. |
-| `Until(phi, psi)`                           | UNSAFE                 | Right side can come arbitrarily late. |
-| `WeakUntil(phi, psi)`                       | inherits `phi`         | Allows `phi` forever; refutable iff `phi` SAFE. |
-| `Release(phi, psi)`                         | inherits `psi`         | `psi` must hold up to release. |
-| `AtPosition(index, phi)`                    | inherits `phi`         | Bounded position. |
-| `Not(phi)`                                  | flips SAFE↔UNSAFE      | AMBIGUOUS preserved. |
-| `And(phi, psi)`                             | SAFE if either is SAFE | Conjunction fails when either fails. |
-| `Or(phi, psi)`                              | SAFE iff both are SAFE | Disjunction fails only when both fail. |
-| `Implies(phi, psi)`                         | classified as `Or(Not(phi), psi)` | Standard rewrite. |
-| `ForAll(var, domain, body)`                 | inherits `body`        | One failing binding refutes the whole. |
-| `Exists(var, domain, body)`                 | UNSAFE                 | Witness binding may appear later. |
+| Operator | Values on a partial trace | Classification |
+|---|---|---|
+| `Now(tool)` | `FALSE`, `PENDING` (past the end), `TRUE` | SAFE |
+| `Called(tool)`, `CalledWith(...)` | `PFALSE`, `TRUE` | UNSAFE |
+| `CalledWithResult(...)` | `PFALSE`, `PENDING` (result not known yet), `TRUE` | UNSAFE |
+| `CalledNTimes(tool, n, "<=" / "<")` | `PTRUE`, `FALSE` | SAFE |
+| `CalledNTimes(tool, n, ">=" / ">")` | `PFALSE`, `TRUE` | UNSAFE (`>= 0`: INERT) |
+| `CalledNTimes(tool, n, "==")` | `PFALSE`, `PTRUE`, `FALSE` | UNSAFE (`== 0`: SAFE) |
+| `Before`, `AllBefore`, `InstanceBefore`, `WithinSteps` | `PENDING` until decided, then `FALSE` or `TRUE` | SAFE |
+| `After(a, b)` | `PFALSE`, `FALSE`, `TRUE` | UNSAFE |
+| `BranchCalled(correct, wrong)` | `PENDING`, `PTRUE`, `FALSE` | SAFE |
+| `CalledInOrder(tools)` | `PENDING`, `TRUE` (it is `F(now a ∧ X F(now b ∧ …))`) | INERT |
+| `Predicate(fn, desc)` | `PTRUE`/`PFALSE`, or `TRUE`/`FALSE` from a `{"final": True}` result | AMBIGUOUS unless `runtime_safe=` |
+| `Not(φ)` | mirrors φ | — |
+| `And` / `Or` / `Implies` | pairwise min / max / max(¬φ, ψ) | — |
+| `Globally(φ)` / `ForAll` | min(φ, `PENDING`) | — |
+| `Eventually(φ)` / `Exists` | max(φ, `PENDING`) / max(φ, `PFALSE`) | — |
+| `Next(φ)`, `AtPosition(i, φ)` | φ, or `PENDING` when the position isn't there yet | — |
+| `Until` / `WeakUntil` / `Release` | the usual unrolling, `PENDING` while undecided | — |
 
 ### `strict_runtime_safety`
 
@@ -630,7 +640,7 @@ from agentltl import Predicate
 # Declared safe → SAFE, no warnings under any severity.
 my_invariant = Predicate(lambda t, p: ..., "invariant", runtime_safe=True)
 
-# Declared liveness → UNSAFE, warns / raises with HARD_STOP / SOFT_BLOCK.
+# Declared repairable → UNSAFE, warns / raises with HARD_STOP / SOFT_BLOCK.
 my_liveness = Predicate(lambda t, p: ..., "liveness", runtime_safe=False)
 ```
 
@@ -648,9 +658,9 @@ agent = AgentWithConstraints(
     constraint_severities={"finish": ConstraintSeverity.HARD_STOP},
 )
 # WARNING agentltl.agents: Runtime-safety mismatch: constraint 'finish'
-# (Eventually(operand=Called(tool='done'))) classified UNSAFE but assigned
-# severity HARD_STOP. Either change the severity to TOLERATE, or rewrite
-# as a bounded property using WithinSteps(tool_a, tool_b, n).
+# (Eventually(operand=Called(tool='done'))) classified INERT but assigned
+# severity HARD_STOP. It cannot fail before the run ends, so a blocking
+# severity never fires. ...
 
 # Good: bounded rewrite.
 agent = AgentWithConstraints(
@@ -660,9 +670,7 @@ agent = AgentWithConstraints(
 # No warning — WithinSteps is SAFE.
 ```
 
-For a forbidden ordering, prefer `Not(Before(b, a))` ("a must precede b")
-or `BranchCalled(correct, wrong)` over raw `Before(a, b)` when you want
-runtime blocking — the rewrites are SAFE while `Before` itself is UNSAFE.
+`Before(a, b)` is SAFE: it is pending until the first `b`, and decided for good then.
 
 ### Inspecting classifications offline
 
