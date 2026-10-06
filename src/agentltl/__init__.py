@@ -140,6 +140,7 @@ from .runtime_safety import (
 
 # ── Backend-agnostic agent wrappers ───────────────────────────────────────────
 from .agents import (
+    EnforcementConfig,
     Agent,
     AgentWithAdditionalTools,
     AgentWithSubAgents,
@@ -178,7 +179,7 @@ __all__ = [
     "RuntimeSafety", "ClassificationReport", "classify_constraints",
     "classify_runtime_safety", "reachable_values",
     # Agent wrappers
-    "Agent", "AgentWithAdditionalTools",
+    "EnforcementConfig", "Agent", "AgentWithAdditionalTools",
     "AgentWithSubAgents", "AgentWithConstraints",
     "MultiTurnAgent",
 ]

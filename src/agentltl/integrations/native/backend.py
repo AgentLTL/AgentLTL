@@ -16,7 +16,7 @@ It is a drop-in agentltl backend:
   ``MultiTurnAgent`` drives so the model SEES prior turns (continuity) and the
   enforcer + trace span the whole session.
 
-The emitted ``metrics`` dict matches the smolagents/langchain backends exactly, so
+The emitted ``metrics`` dict matches the smolagents backend, so
 ``verify_trace`` consumes the native trace with no adaptation.
 
 Tools are smolagents ``Tool`` objects (``.name/.description/.inputs``, callable as
@@ -132,6 +132,10 @@ class NativeOpenAIAgent:
         _skip_runtime_safety_check: bool = False,
         **_ignored: Any,
     ) -> None:
+        if not _skip_runtime_safety_check:
+            from agentltl.runtime_safety import check_runtime_safety_or_warn
+            check_runtime_safety_or_warn(constraints or [], constraint_severities,
+                                         default_severity, strict=False, logger=logger)
         if mcp_servers:
             logger.warning("NativeOpenAIAgent: mcp_servers is not supported and is ignored.")
         if _ignored:

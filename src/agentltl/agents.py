@@ -1,15 +1,16 @@
 """
 agentltl/agents.py – backend-agnostic agent wrappers.
 
-These classes dispatch to either the smolagents or LangChain backend depending
-on the ``backend=`` parameter, while exposing a single, consistent public API.
+These classes dispatch to the smolagents or the native (OpenAI-compatible) backend
+depending on the ``backend=`` parameter, while exposing a single, consistent public API.
 
 Classes
 -------
 * :class:`Agent`                     – base agent (smolagents backend only)
 * :class:`AgentWithAdditionalTools`  – MCP-enabled agent (smolagents backend only)
 * :class:`AgentWithSubAgents`        – sub-agent orchestrator (smolagents backend only)
-* :class:`AgentWithConstraints`      – FOLTL constraint enforcement (smolagents or langchain)
+* :class:`AgentWithConstraints`      – FOLTL constraint enforcement (smolagents or native)
+* :class:`MultiTurnAgent`            – one conversation over several user turns (native)
 
 All ``run()`` methods return ``{"answer", "metrics", "error"}``.
 See ``docs/reference.md`` for the full return-value schema.
@@ -17,6 +18,7 @@ See ``docs/reference.md`` for the full return-value schema.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -61,6 +63,10 @@ class Agent:
         model_instance: Optional[Any] = None,
         base_url: Optional[str] = None,
         backend: str = "smolagents",
+        nudge_max: int = 1,
+        max_termination_nudges: int = 0,
+        max_blocked_steps: Optional[int] = None,
+        enforcer_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
         if backend == "smolagents":
             from agentltl.integrations.smolagents.backend import SmolAgentsAgent
@@ -214,38 +220,67 @@ class AgentWithSubAgents:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Constrained agent — supports both smolagents and langchain backends
+# Enforcement settings
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclasses.dataclass
+class EnforcementConfig:
+    """The enforcement settings of an agent, in one place.
+
+    ``AgentWithConstraints(..., enforcement=EnforcementConfig(...))`` and
+    ``MultiTurnAgent(..., enforcement=...)`` take it instead of the same settings as
+    separate keywords (which still work; this wins where both are given). See
+    :class:`agentltl.Enforcer` for what each one does.
+    """
+
+    constraints: Optional[List[Any]] = None
+    constraint_severities: Optional[Dict[str, ConstraintSeverity]] = None
+    default_severity: ConstraintSeverity = ConstraintSeverity.HARD_STOP
+    max_soft_attempts: int = 3
+    soft_block_mode: str = "cumulative"
+    max_consecutive_soft_attempts: Optional[int] = None
+    nudge_max: int = 1
+    max_termination_nudges: int = 0
+    enforcer_kwargs: Optional[Dict[str, Any]] = None
+
+    def as_kwargs(self) -> Dict[str, Any]:
+        return {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Constrained agent — smolagents or native backend
 # ─────────────────────────────────────────────────────────────────────────────
 
 class AgentWithConstraints:
     """Backend-agnostic FOLTL constrained agent.
 
-    Dispatches to the smolagents or LangChain backend depending on
-    ``backend=``.  The public interface is identical regardless of backend.
+    Dispatches to the smolagents or native backend depending on ``backend=``. The public
+    interface is identical regardless of backend; both drive an :class:`agentltl.Enforcer`.
 
     Parameters shared by all backends
     ----------------------------------
     tools, constraints, constraint_severities, default_severity,
     max_soft_attempts, soft_block_mode, max_consecutive_soft_attempts,
-    max_steps
+    max_steps, nudge_max, max_termination_nudges, enforcer_kwargs (further
+    :class:`agentltl.Enforcer` settings)
 
     Model / connectivity parameters
     --------------------------------
     model            – string model name; resolved per-backend
-    api_key          – API key (smolagents HF token; OpenAI key for langchain)
-    provider         – HF Inference provider name (smolagents only)
-    model_seed       – optional reproducible-sampling seed (smolagents only)
+    api_key          – API key (smolagents: HF token; native: OpenAI-compatible key)
+    provider         – HF Inference provider name
+    model_seed       – optional reproducible-sampling seed
     model_instance   – pre-built model object passed through to the backend
-    mcp_servers      – MCP server config dict (smolagents only; ignored with
-                       a warning for the langchain backend)
-    system_prompt    – optional system prompt (langchain backend; ignored
-                       by smolagents unless added to the task string)
+    mcp_servers      – MCP server config dict (smolagents only)
+    system_prompt    – optional system prompt (native backend)
+    base_url         – OpenAI-compatible endpoint (native backend)
+    max_blocked_steps – turns in which nothing ran, allowed beyond max_steps (native)
 
     Backend selection
     -----------------
     backend : str, default ``"smolagents"``
         ``"smolagents"``  – use :class:`SmolAgentsAgentWithConstraints`
-        ``"langchain"``   – use :class:`LangChainConstrainedBackend`
+        ``"native"``      – use :class:`NativeOpenAIAgent`
 
     Returns
     -------
@@ -273,7 +308,22 @@ class AgentWithConstraints:
         strict_runtime_safety: bool = False,
         base_url: Optional[str] = None,
         backend: str = "smolagents",
+        nudge_max: int = 1,
+        max_termination_nudges: int = 0,
+        max_blocked_steps: Optional[int] = None,
+        enforcer_kwargs: Optional[Dict[str, Any]] = None,
+        enforcement: Optional[EnforcementConfig] = None,
     ) -> None:
+        if enforcement is not None:
+            constraints = enforcement.constraints
+            constraint_severities = enforcement.constraint_severities
+            default_severity = enforcement.default_severity
+            max_soft_attempts = enforcement.max_soft_attempts
+            soft_block_mode = enforcement.soft_block_mode
+            max_consecutive_soft_attempts = enforcement.max_consecutive_soft_attempts
+            nudge_max = enforcement.nudge_max
+            max_termination_nudges = enforcement.max_termination_nudges
+            enforcer_kwargs = enforcement.enforcer_kwargs
         check_runtime_safety_or_warn(
             constraints or [],
             constraint_severities,
@@ -298,23 +348,9 @@ class AgentWithConstraints:
                 max_steps=max_steps,
                 model_seed=model_seed,
                 model_instance=model_instance,
-                _skip_runtime_safety_check=True,
-            )
-        elif backend == "langchain":
-            from agentltl.integrations.langchain.backend import LangChainConstrainedBackend
-            self._impl = LangChainConstrainedBackend(
-                tools=tools,
-                mcp_servers=mcp_servers,
-                constraints=constraints,
-                constraint_severities=constraint_severities,
-                default_severity=default_severity,
-                max_soft_attempts=max_soft_attempts,
-                soft_block_mode=soft_block_mode,
-                max_consecutive_soft_attempts=max_consecutive_soft_attempts,
-                model=model,
-                model_instance=model_instance,
-                max_steps=max_steps,
-                system_prompt=system_prompt,
+                nudge_max=nudge_max,
+                max_termination_nudges=max_termination_nudges,
+                enforcer_kwargs=enforcer_kwargs,
                 _skip_runtime_safety_check=True,
             )
         elif backend == "native":
@@ -336,12 +372,15 @@ class AgentWithConstraints:
                 model_seed=model_seed,
                 model_instance=model_instance,
                 system_prompt=system_prompt,
+                nudge_max=nudge_max,
+                max_termination_nudges=max_termination_nudges,
+                max_blocked_steps=max_blocked_steps,
+                enforcer_kwargs=enforcer_kwargs,
                 _skip_runtime_safety_check=True,
             )
         else:
             raise ValueError(
-                f"Unknown backend: {backend!r}. "
-                "Choose 'smolagents', 'langchain', or 'native'."
+                f"Unknown backend: {backend!r}. Choose 'smolagents' or 'native'."
             )
 
     def run(
@@ -417,7 +456,18 @@ class MultiTurnAgent:
         enforcer_kwargs: Optional[Dict[str, Any]] = None,
         agent_cls: Optional[Any] = None,
         agent_kwargs: Optional[Dict[str, Any]] = None,
+        enforcement: Optional[EnforcementConfig] = None,
     ) -> None:
+        if enforcement is not None:
+            constraints = enforcement.constraints
+            constraint_severities = enforcement.constraint_severities
+            default_severity = enforcement.default_severity
+            max_soft_attempts = enforcement.max_soft_attempts
+            soft_block_mode = enforcement.soft_block_mode
+            max_consecutive_soft_attempts = enforcement.max_consecutive_soft_attempts
+            nudge_max = enforcement.nudge_max
+            max_termination_nudges = enforcement.max_termination_nudges
+            enforcer_kwargs = enforcement.enforcer_kwargs
         if backend != "native":
             raise ValueError(
                 f"MultiTurnAgent only supports backend='native'; got {backend!r}."
@@ -508,6 +558,7 @@ class MultiTurnAgent:
 
 
 __all__ = [
+    "EnforcementConfig",
     "Agent",
     "AgentWithAdditionalTools",
     "AgentWithSubAgents",

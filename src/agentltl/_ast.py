@@ -60,6 +60,32 @@ from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence, Tup
 # Base
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _literal(value: Any) -> str:
+    """A value as the parser reads it (strings in double quotes, true/false/null)."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str) and '"' not in value:
+        return f'"{value}"'
+    return repr(value)
+
+
+def _frozen(value: Any) -> Any:
+    """A hashable stand-in for argument values (dicts and lists)."""
+    if isinstance(value, dict):
+        return tuple(sorted((k, _frozen(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_frozen(v) for v in value)
+    try:
+        hash(value)
+        return value
+    except TypeError:
+        return repr(value)
+
+
 @dataclass(frozen=True)
 class Formula:
     """Abstract base for every LTL AST node."""
@@ -119,8 +145,11 @@ class CalledWith(Formula):
     expected_args: Dict[str, Any] = field(default_factory=dict)
 
     def __str__(self) -> str:
-        args = ", ".join(f"{k}={v!r}" for k, v in self.expected_args.items())
-        return f'called_with("{self.tool}", {args})'
+        args = "".join(f", {k}={_literal(v)}" for k, v in self.expected_args.items())
+        return f'called_with("{self.tool}"{args})'
+
+    def __hash__(self) -> int:
+        return hash((self.tool, _frozen(self.expected_args)))
 
 
 @dataclass(frozen=True)
@@ -221,6 +250,9 @@ class CalledWithResult(Formula):
         args = ", ".join(f"{k}={v!r}" for k, v in self.expected_args.items())
         arg_str = f", {args}" if args else ""
         return f'called_with_result("{self.tool}"{arg_str}, result={self.expected_result!r})'
+
+    def __hash__(self) -> int:
+        return hash((self.tool, _frozen(self.expected_result), _frozen(self.expected_args)))
 
 
 @dataclass(frozen=True)
@@ -358,7 +390,7 @@ class Not(Formula):
     operand: Formula
 
     def __str__(self) -> str:
-        return f"¬({self.operand})"
+        return f"!({self.operand})"
 
 
 @dataclass(frozen=True)
@@ -368,7 +400,7 @@ class And(Formula):
     right: Formula
 
     def __str__(self) -> str:
-        return f"({self.left}) ∧ ({self.right})"
+        return f"({self.left}) & ({self.right})"
 
 
 @dataclass(frozen=True)
@@ -378,7 +410,7 @@ class Or(Formula):
     right: Formula
 
     def __str__(self) -> str:
-        return f"({self.left}) ∨ ({self.right})"
+        return f"({self.left}) | ({self.right})"
 
 
 @dataclass(frozen=True)
@@ -388,7 +420,7 @@ class Implies(Formula):
     right: Formula
 
     def __str__(self) -> str:
-        return f"({self.left}) → ({self.right})"
+        return f"({self.left}) -> ({self.right})"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -477,7 +509,7 @@ class Since(Formula):
     right: Formula
 
     def __str__(self) -> str:
-        return f"({self.left} S {self.right})"
+        return f"({self.left}) S ({self.right})"
 
 
 @dataclass(frozen=True)

@@ -2,7 +2,7 @@
 agentltl/enforcement.py – shared runtime enforcement types.
 
 This module defines the public types used by ALL backend integrations
-(smolagents, LangChain, etc.) for constraint enforcement at runtime.
+(smolagents, the native loop, harnesses) for constraint enforcement at runtime.
 It has **zero framework dependencies** and can be imported without
 installing any optional extras.
 

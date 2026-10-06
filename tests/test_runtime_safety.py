@@ -366,7 +366,7 @@ def test_hook_warns_on_unknown_node_with_node_type(caplog):
 
 
 class _StubBackend:
-    """Cheap stand-in for the smolagents/langchain backend so we can exercise
+    """Cheap stand-in for the smolagents backend so we can exercise
     AgentWithConstraints without bringing up a real model."""
 
     def __init__(self, *args, **kwargs):
@@ -384,7 +384,7 @@ def _patch_backends(monkeypatch):
 
     The runtime-safety hook fires *before* backend construction in
     ``AgentWithConstraints.__init__`` so the stub is enough to verify the
-    integration end-to-end without smolagents/langchain pulling in models,
+    integration end-to-end without smolagents pulling in models,
     MCP, etc.
 
     We inject a synthetic ``agentltl.integrations.smolagents.backend``
@@ -517,39 +517,6 @@ def test_agent_with_constraints_skips_final_answer_constraints(monkeypatch, capl
             constraint_severities={"liveness": ConstraintSeverity.HARD_STOP},
         )
     assert caplog.records == []
-
-
-def test_constraint_enforcement_middleware_strict_raises():
-    pytest.importorskip("langchain")
-    from agentltl.integrations.langchain.constrained_agent import (
-        ConstraintEnforcementMiddleware,
-    )
-
-    constraints = [Constraint("liveness", Eventually(Called("done")))]
-    with pytest.raises(ValueError, match="Runtime-safety mismatch"):
-        ConstraintEnforcementMiddleware(
-            constraints=constraints,
-            constraint_severities={"liveness": ConstraintSeverity.HARD_STOP},
-            strict_runtime_safety=True,
-        )
-
-
-def test_constraint_enforcement_middleware_default_warns(caplog):
-    pytest.importorskip("langchain")
-    from agentltl.integrations.langchain.constrained_agent import (
-        ConstraintEnforcementMiddleware,
-    )
-
-    constraints = [Constraint("liveness", Eventually(Called("done")))]
-    with caplog.at_level(
-        logging.WARNING,
-        logger="agentltl.integrations.langchain.constrained_agent",
-    ):
-        ConstraintEnforcementMiddleware(
-            constraints=constraints,
-            constraint_severities={"liveness": ConstraintSeverity.HARD_STOP},
-        )
-    assert any("Runtime-safety mismatch" in r.message for r in caplog.records)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

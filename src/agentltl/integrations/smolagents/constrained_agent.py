@@ -1,23 +1,16 @@
 """
 constrained_agent.py – ToolCallingAgent with pre-execution constraint checking.
 
-This module extends :class:`ToolCallingAgent` with a constraint evaluation layer
-that intercepts every LLM-generated tool call **before** it is executed.  At each
-interception point a partial trace (all completed calls plus the pending call) is
-built and evaluated against a set of FOLTL constraints.  Depending on the
-constraint's severity the agent either:
+:class:`ToolCallingAgentWithConstraints` hands every tool call the model proposes to an
+:class:`agentltl.Enforcer` before it runs. Depending on the decision the call runs, or the
+model gets the enforcer's feedback instead of a result (``warn``, ``retry``, ``block``;
+``ask`` too, since there is no human to ask here), or the run stops (``HARD_STOP``, or a
+``SOFT_BLOCK`` that ran out of retries) with a :class:`ConstraintViolationError`.
 
-* **HARD_STOP** – aborts the run immediately (the tool call is never executed).
-* **SOFT_BLOCK** – blocks the call, returns a constraint-violation observation to
-  the model so it can self-correct, and continues the run.
-* **BLOCK_AND_WARN** – blocks the call and returns a warning observation. If the
-  model's *next* tool call is byte-identical to the call that was just blocked,
-  the override fires and the call is executed. Never escalates to HARD_STOP.
-* **TOLERATE** – logs a warning and continues execution.
-
-The ``final_answer`` tool is always exempt from constraint checking because by the
-time the agent decides to return an answer it is already too late to prevent any
-side-effect.
+``final_answer`` is not checked as a call. Constraints marked ``applies_to_final_answer``
+are checked when the model gives it (strict semantics, the trace being final): with
+``max_termination_nudges`` > 0 the model is sent back, that many times at most, to do
+what is missing.
 
 Usage
 -----
@@ -37,18 +30,15 @@ Usage
 
 from __future__ import annotations
 
-import enum
 import logging
-import re
-from dataclasses import dataclass, field
-from typing import Any, Dict, Generator, List, Optional, Sequence
+from typing import Any, Dict, Generator, List, Optional
 
 from rich.panel import Panel
 from rich.text import Text
 
-from smolagents.agents import ToolCallingAgent, ActionOutput, ToolOutput
+from smolagents.agents import ToolCallingAgent, ToolOutput
 from smolagents.agent_types import AgentImage, AgentAudio
-from smolagents.memory import ActionStep, ToolCall, Timing, FinalAnswerStep, TokenUsage
+from smolagents.memory import ActionStep, ToolCall
 from smolagents.models import ChatMessage
 from smolagents.monitoring import LogLevel
 from smolagents.utils import AgentError
@@ -56,14 +46,12 @@ from smolagents.utils import AgentError
 from agentltl.enforcement import (
     ConstraintSeverity,
     SoftBlockMode,
-    ConstraintViolation,
     ConstraintViolationError as _BaseConstraintViolationError,
 )
+from agentltl.enforcer import Enforcer
 from agentltl.runtime_safety import check_runtime_safety_or_warn
 
 logger = logging.getLogger(__name__)
-
-_STEP_INDEXED_CONSTRAINT_RE = re.compile(r"^L[0-9]+_step_(\d+)_")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -71,16 +59,12 @@ _STEP_INDEXED_CONSTRAINT_RE = re.compile(r"^L[0-9]+_step_(\d+)_")
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ConstraintViolationError(_BaseConstraintViolationError, AgentError):
-    """Raised when a constraint blocks a tool call before execution.
+    """Raised when a constraint stops the run.
 
     Subclasses both the framework-agnostic
     :class:`agentltl.enforcement.ConstraintViolationError` **and** smolagents'
     :class:`AgentError`, so the smolagents run-loop catches it via its standard
     ``except AgentError`` handler.
-
-    The ``logger_to_use`` parameter is accepted for backward compatibility —
-    it is used to call ``logger_to_use.log_error()`` before the exception is
-    raised, matching smolagents' convention.
     """
 
     def __init__(
@@ -94,7 +78,6 @@ class ConstraintViolationError(_BaseConstraintViolationError, AgentError):
         threshold_str: str = "",
         logger_to_use=None,
     ):
-        # Build the structured message and set all fields via the base class.
         _BaseConstraintViolationError.__init__(
             self,
             constraint_name=constraint_name,
@@ -105,35 +88,7 @@ class ConstraintViolationError(_BaseConstraintViolationError, AgentError):
             soft_block_mode=soft_block_mode,
             threshold_str=threshold_str,
         )
-        # Initialise AgentError with the already-built message.
-        # This also calls logger_to_use.log_error(msg) if a logger was supplied.
         AgentError.__init__(self, str(self.args[0]), logger=logger_to_use)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Internal signal (smolagents-specific)
-# ─────────────────────────────────────────────────────────────────────────────
-
-class _SoftBlockSignal(Exception):
-    """Internal signal raised inside process_single_tool_call_constrained when a
-    SOFT_BLOCK or BLOCK_AND_WARN constraint fires. Caught by the outer generator
-    to yield feedback. The ``mode`` field selects the feedback wording."""
-
-    def __init__(
-        self,
-        tool_call,
-        violation: "ConstraintViolation",
-        count: int,
-        consec: int = 0,
-        threshold_str: str = "",
-        mode: str = "soft_block",
-    ):
-        self.tool_call = tool_call
-        self.violation = violation
-        self.count = count
-        self.consec = consec
-        self.threshold_str = threshold_str
-        self.mode = mode
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -141,34 +96,20 @@ class _SoftBlockSignal(Exception):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ToolCallingAgentWithConstraints(ToolCallingAgent):
-    """A :class:`ToolCallingAgent` that evaluates FOLTL constraints **before**
-    every tool call.
+    """A :class:`ToolCallingAgent` whose tool calls are judged by an
+    :class:`agentltl.Enforcer` before they run.
 
     Parameters
     ----------
     tools, model, prompt_templates, planning_interval, stream_outputs,
     max_tool_threads, **kwargs
         Forwarded to :class:`ToolCallingAgent`.
-    constraints : list[Constraint] | None
-        FOLTL constraints to enforce at every step.  Can also be supplied (or
-        overridden) per-run via :meth:`run`.
-    constraint_severities : dict[str, ConstraintSeverity] | None
-        Maps constraint **names** → severity.  Constraints not listed here
-        default to ``HARD_STOP``.
-    default_severity : ConstraintSeverity
-        Fallback severity for constraints that are not in *constraint_severities*.
-    max_soft_attempts : int
-        For ``CUMULATIVE`` and ``HYBRID`` modes: maximum total SOFT_BLOCK
-        violations allowed per constraint per run before escalating.  For
-        ``CONSECUTIVE`` mode this is unused (use *max_consecutive_soft_attempts*).
-        Default: 3.
-    soft_block_mode : str | SoftBlockMode
-        Escalation counting strategy.  One of ``"cumulative"`` (default),
-        ``"consecutive"``, or ``"hybrid"``.  See :class:`SoftBlockMode`.
-    max_consecutive_soft_attempts : int | None
-        For ``CONSECUTIVE`` and ``HYBRID`` modes: maximum *consecutive*
-        violations before escalating.  Defaults to *max_soft_attempts* if not
-        set.
+    constraints, constraint_severities, default_severity, max_soft_attempts,
+    soft_block_mode, max_consecutive_soft_attempts, nudge_max, max_termination_nudges
+        Forwarded to :class:`agentltl.Enforcer`. Constraints and severities can also be
+        given per run (:meth:`run`).
+    enforcer_kwargs
+        Further :class:`agentltl.Enforcer` settings (``rank``, ``render``, ...).
     """
 
     def __init__(
@@ -182,6 +123,9 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
         max_soft_attempts: int = 3,
         soft_block_mode: "str | SoftBlockMode" = "cumulative",
         max_consecutive_soft_attempts: "int | None" = None,
+        nudge_max: int = 1,
+        max_termination_nudges: int = 0,
+        enforcer_kwargs: Optional[Dict[str, Any]] = None,
         prompt_templates=None,
         planning_interval: int | None = None,
         stream_outputs: bool = False,
@@ -207,129 +151,19 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
             max_tool_threads=max_tool_threads,
             **kwargs,
         )
-        self._init_constraints = constraints or []
-        self._init_severities = constraint_severities or {}
-        self._default_severity = default_severity
-        self.max_soft_attempts = max_soft_attempts
-        self.soft_block_mode = (
-            SoftBlockMode(soft_block_mode)
-            if isinstance(soft_block_mode, str)
-            else soft_block_mode
+        self._init_constraints = list(constraints or [])
+        self._init_severities = dict(constraint_severities or {})
+        self.enforcer = Enforcer(
+            self._init_constraints, self._init_severities, default_severity,
+            max_soft_attempts, soft_block_mode, max_consecutive_soft_attempts,
+            nudge_max=nudge_max, max_termination_nudges=max_termination_nudges,
+            **(enforcer_kwargs or {}),
         )
-        self.max_consecutive_soft_attempts = (
-            max_consecutive_soft_attempts
-            if max_consecutive_soft_attempts is not None
-            else max_soft_attempts
-        )
+        self._blocked_tool_call: Optional[Dict[str, Any]] = None
 
-        # Per-run mutable state (reset in _reset_constraint_state)
-        self._active_constraints: list = []
-        self._active_severities: Dict[str, ConstraintSeverity] = {}
-        self._completed_tool_calls: List[Dict[str, Any]] = []
-        self._constraint_violations: List[ConstraintViolation] = []
-        self._run_status: str = "completed"
-        self._stopped_by: str | None = None
-        self._blocked_tool_call: Dict[str, Any] | None = None
-        self._constraint_checks_count: int = 0
-        self._soft_block_counts: Dict[str, int] = {}
-        self._consecutive_soft_block_counts: Dict[str, int] = {}
-        self._soft_blocked_calls: List[Dict[str, Any]] = []
-        # BLOCK_AND_WARN state
-        self._last_blocked_call: Optional[Dict[str, Any]] = None
-        self._block_and_warn_overrides: List[Dict[str, Any]] = []
-        self._block_and_warn_counts: Dict[str, int] = {}
-        self._current_turn_id: int = 0
-        # PERSISTENT_BLOCK state (no override, so no insistence pointer)
-        self._persistent_block_counts: Dict[str, int] = {}
-
-    def _reset_constraint_state(self):
-        """Reset per-run mutable state.  Called at the start of each ``run``."""
-        self._completed_tool_calls = []
-        self._constraint_violations = []
-        self._run_status = "completed"
-        self._stopped_by = None
-        self._blocked_tool_call = None
-        self._constraint_checks_count = 0
-        self._soft_block_counts = {}
-        self._consecutive_soft_block_counts = {}
-        self._soft_blocked_calls = []
-        self._last_blocked_call = None
-        self._block_and_warn_overrides = []
-        self._block_and_warn_counts = {}
-        self._current_turn_id = 0
-        self._persistent_block_counts = {}
-
-    @staticmethod
-    def _canonical_args(args: Any) -> Any:
-        """Recursively canonicalise tool arguments for byte-identical comparison.
-
-        Sorts dict keys; recurses into lists/tuples; leaves scalars alone.
-        Used for the BLOCK_AND_WARN insistence-pointer equality check.
-        """
-        if isinstance(args, dict):
-            return {
-                k: ToolCallingAgentWithConstraints._canonical_args(args[k])
-                for k in sorted(args.keys())
-            }
-        if isinstance(args, (list, tuple)):
-            return [ToolCallingAgentWithConstraints._canonical_args(v) for v in args]
-        return args
-
-    def _severity_for(self, constraint_name: str) -> ConstraintSeverity:
-        return self._active_severities.get(constraint_name, self._default_severity)
-
-    def _build_speculative_trace(
-        self, tool_name: str, tool_args: Any, tool_id: str | None = None
-    ) -> Dict[str, Any]:
-        """Build a metrics dict with all completed calls plus one pending call."""
-        pending = {
-            "tool_name": tool_name,
-            "tool_args": tool_args if isinstance(tool_args, dict) else {},
-            "tool_id": tool_id,
-            "tool_result": None,
-        }
-        return {"tool_calls": self._completed_tool_calls + [pending]}
-
-    def _evaluate_constraints(
-        self,
-        speculative_metrics: Dict[str, Any],
-        step_number: int,
-        tool_name: str,
-        tool_args: Any,
-    ) -> List[ConstraintViolation]:
-        """Run FOLTL constraint evaluation on the speculative trace."""
-        from agentltl import verify_trace
-
-        self._constraint_checks_count += 1
-
-        result = verify_trace(
-            speculative_metrics,
-            self._active_constraints,
-            partial_trace=True,
-        )
-
-        violations: List[ConstraintViolation] = []
-        for cr in result.get("constraints", []):
-            # Defer future step-indexed constraints (e.g. L1_step_4_*, L2_step_7_*).
-            # In pre-execution checking for step N, only constraints up to step N
-            # should be enforceable; future checks must not block current action.
-            m = _STEP_INDEXED_CONSTRAINT_RE.match(cr.get("name", ""))
-            if m:
-                expected_step = int(m.group(1))
-                if expected_step > step_number:
-                    continue
-
-            if not cr["passed"]:
-                severity = self._severity_for(cr["name"])
-                violations.append(ConstraintViolation(
-                    constraint_name=cr["name"],
-                    severity=severity.value,
-                    step_number=step_number,
-                    tool_name=tool_name,
-                    tool_args=tool_args,
-                    detail=cr.get("detail", ""),
-                ))
-        return violations
+    @property
+    def soft_block_mode(self) -> SoftBlockMode:
+        return self.enforcer.soft_block_mode
 
     def run(
         self,
@@ -345,12 +179,12 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
         return_full_result: bool | None = None,
     ):
         """Run the agent with pre-execution constraint checking."""
-        self._reset_constraint_state()
-
-        self._active_constraints = constraints if constraints is not None else self._init_constraints
-        sev = constraint_severities if constraint_severities is not None else self._init_severities
-        self._active_severities = sev
-
+        self.enforcer.reset()
+        self._blocked_tool_call = None
+        self.enforcer.set_constraints(
+            constraints if constraints is not None else self._init_constraints,
+            constraint_severities if constraint_severities is not None else self._init_severities,
+        )
         return super().run(
             task=task,
             stream=stream,
@@ -364,20 +198,14 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
     def process_tool_calls(
         self, chat_message: ChatMessage, memory_step: ActionStep
     ) -> Generator[ToolCall | ToolOutput, None, None]:
-        """Process tool calls with pre-execution constraint evaluation.
-
-        When no constraints are active this method falls back to the parent
-        implementation for zero overhead.
-        """
-        if not self._active_constraints:
+        """Judge each tool call of this model message before it runs, one by one so
+        later calls see the earlier ones in the trace."""
+        if not self.enforcer.has_constraints:
             yield from super().process_tool_calls(chat_message, memory_step)
             return
 
-        # New LLM generation — bump turn id so BLOCK_AND_WARN insistence-overrides
-        # set in earlier turns become eligible to fire in this turn. Parallel duplicates
-        # within the same turn fail the (set_in_turn < current_turn_id) check.
-        self._current_turn_id += 1
-
+        # one model message = one generation: identical parallel calls don't insist
+        self.enforcer.begin_generation()
         parallel_calls: dict[str, ToolCall] = {}
         assert chat_message.tool_calls is not None
         for chat_tool_call in chat_message.tool_calls:
@@ -389,395 +217,77 @@ class ToolCallingAgentWithConstraints(ToolCallingAgent):
             yield tool_call
             parallel_calls[tool_call.id] = tool_call
 
-        def process_single_tool_call_constrained(tool_call: ToolCall) -> ToolOutput:
-            tool_name = tool_call.name
-            tool_arguments = tool_call.arguments or {}
-
-            # BLOCK_AND_WARN insistence override:
-            # if the model is re-issuing the byte-identical call that was just
-            # blocked (in a *later* turn — parallel duplicates within the same
-            # turn don't qualify), let it through without re-evaluating
-            # constraints (otherwise BLOCK_AND_WARN would simply re-fire).
-            is_insistence_override = False
-            if self._last_blocked_call is not None:
-                canonical = self._canonical_args(tool_arguments)
-                if (
-                    self._last_blocked_call["tool_name"] == tool_name
-                    and self._last_blocked_call["tool_args_canonical"] == canonical
-                    and self._last_blocked_call["set_in_turn"] < self._current_turn_id
-                ):
-                    is_insistence_override = True
-                    step_num_override = getattr(memory_step, "step_number", 0)
-                    self._block_and_warn_overrides.append({
-                        "step": step_num_override,
-                        "tool_name": tool_name,
-                        "tool_args": tool_arguments if isinstance(tool_arguments, dict) else {},
-                        "constraint_name": self._last_blocked_call["constraint_name"],
-                        "blocked_at_step": self._last_blocked_call["step_number"],
-                    })
-                    # Mark the matching prior block record as overridden
-                    for entry in reversed(self._soft_blocked_calls):
-                        if (
-                            entry.get("mode") == "block_and_warn"
-                            and entry.get("tool_name") == tool_name
-                            and entry.get("constraint") == self._last_blocked_call["constraint_name"]
-                            and not entry.get("overridden_next_step")
-                        ):
-                            entry["overridden_next_step"] = True
-                            break
-                    logger.info(
-                        "BLOCK_AND_WARN override: model insisted on '%s' "
-                        "(constraint '%s'). Executing.",
-                        tool_name, self._last_blocked_call["constraint_name"],
-                    )
-                    self._last_blocked_call = None
-
-            # final_answer is normally exempt from constraint checking.
-            # Constraints with applies_to_final_answer=True opt in to being
-            # checked before the Finish action (required for kappa_ground
-            # HARD_STOP / SOFT_BLOCK online enforcement).
-            _fa_constraints = [
-                c for c in self._active_constraints
-                if getattr(c, "applies_to_final_answer", False)
-            ]
-            _should_check = (
-                not is_insistence_override
-                and self._active_constraints
-                and (tool_name != "final_answer" or _fa_constraints)
-            )
-            _constraints_for_check = (
-                _fa_constraints if tool_name == "final_answer" else self._active_constraints
-            )
-            if _should_check:
-                step_num = getattr(memory_step, "step_number", 0)
-                spec_metrics = self._build_speculative_trace(tool_name, tool_arguments, tool_call.id)
-                # Temporarily override active constraints for this evaluation
-                _saved = self._active_constraints
-                self._active_constraints = _constraints_for_check
-                violations = self._evaluate_constraints(spec_metrics, step_num, tool_name, tool_arguments)
-                self._active_constraints = _saved
-
-                for v in violations:
-                    self._constraint_violations.append(v)
-
-                    if v.severity == ConstraintSeverity.HARD_STOP.value:
-                        self._run_status = "stopped"
-                        self._stopped_by = v.constraint_name
-                        self._blocked_tool_call = {
-                            "tool_name": tool_name,
-                            "tool_args": tool_arguments if isinstance(tool_arguments, dict) else {},
-                            "tool_id": tool_call.id,
-                            "tool_result": "BLOCKED_BY_CONSTRAINT",
-                            "blocked_by": v.constraint_name,
-                            "step_number": step_num,
-                        }
-                        logger.warning(
-                            "HARD_STOP: constraint '%s' violated by tool '%s' (step %d). Aborting.",
-                            v.constraint_name, tool_name, step_num,
-                        )
-                        self.interrupt_switch = True
-                        raise ConstraintViolationError(
-                            constraint_name=v.constraint_name,
-                            tool_name=tool_name,
-                            tool_args=tool_arguments,
-                            detail=v.detail,
-                            violation_type="HARD_STOP",
-                            logger_to_use=self.logger,
-                        )
-                    elif v.severity == ConstraintSeverity.SOFT_BLOCK.value:
-                        # Cumulative counter (always incremented)
-                        count = self._soft_block_counts.get(v.constraint_name, 0) + 1
-                        self._soft_block_counts[v.constraint_name] = count
-
-                        # Consecutive counter (CONSECUTIVE / HYBRID modes only)
-                        if self.soft_block_mode in (SoftBlockMode.CONSECUTIVE, SoftBlockMode.HYBRID):
-                            consec = self._consecutive_soft_block_counts.get(v.constraint_name, 0) + 1
-                            self._consecutive_soft_block_counts[v.constraint_name] = consec
-                        else:
-                            consec = count  # mirrors cumulative for logging in CUMULATIVE mode
-
-                        # Build human-readable threshold string
-                        if self.soft_block_mode == SoftBlockMode.CUMULATIVE:
-                            threshold_str = f"total {count}/{self.max_soft_attempts}"
-                        elif self.soft_block_mode == SoftBlockMode.CONSECUTIVE:
-                            threshold_str = f"consecutive {consec}/{self.max_consecutive_soft_attempts}"
-                        else:  # HYBRID
-                            threshold_str = (
-                                f"consecutive {consec}/{self.max_consecutive_soft_attempts}, "
-                                f"total {count}/{self.max_soft_attempts}"
-                            )
-
-                        self._soft_blocked_calls.append({
-                            "step": step_num,
-                            "tool_name": tool_name,
-                            "tool_args": tool_arguments if isinstance(tool_arguments, dict) else {},
-                            "constraint": v.constraint_name,
-                            "detail": v.detail,
-                            "attempt": count,
-                            "consecutive": consec,
-                        })
-                        logger.warning(
-                            "SOFT_BLOCK: constraint '%s' violated by tool '%s' (step %d, %s).",
-                            v.constraint_name, tool_name, step_num, threshold_str,
-                        )
-
-                        # Determine whether to escalate
-                        if self.soft_block_mode == SoftBlockMode.CUMULATIVE:
-                            escalate = count >= self.max_soft_attempts
-                            escalation_detail = (
-                                f"Max soft-block attempts ({self.max_soft_attempts}) exceeded "
-                                f"for constraint '{v.constraint_name}'. Halting."
-                            )
-                        elif self.soft_block_mode == SoftBlockMode.CONSECUTIVE:
-                            escalate = consec >= self.max_consecutive_soft_attempts
-                            escalation_detail = (
-                                f"Max consecutive soft-block attempts "
-                                f"({self.max_consecutive_soft_attempts}) exceeded "
-                                f"for constraint '{v.constraint_name}'. Halting."
-                            )
-                        else:  # HYBRID
-                            escalate = (
-                                consec >= self.max_consecutive_soft_attempts
-                                or count >= self.max_soft_attempts
-                            )
-                            escalation_detail = (
-                                f"Soft-block escalation threshold reached for constraint "
-                                f"'{v.constraint_name}' ({threshold_str}). Halting."
-                            )
-
-                        if escalate:
-                            self._run_status = "stopped"
-                            self._stopped_by = v.constraint_name
-                            self.interrupt_switch = True
-                            raise ConstraintViolationError(
-                                constraint_name=v.constraint_name,
-                                tool_name=tool_name,
-                                tool_args=tool_arguments,
-                                detail=escalation_detail,
-                                violation_type="SOFT_BLOCK_ESCALATION",
-                                soft_block_mode=self.soft_block_mode.value,
-                                threshold_str=threshold_str,
-                                logger_to_use=self.logger,
-                            )
-                        raise _SoftBlockSignal(
-                            tool_call=tool_call,
-                            violation=v,
-                            count=count,
-                            consec=consec,
-                            threshold_str=threshold_str,
-                            mode="soft_block",
-                        )
-                    elif v.severity == ConstraintSeverity.BLOCK_AND_WARN.value:
-                        canonical = self._canonical_args(tool_arguments)
-                        self._block_and_warn_counts[v.constraint_name] = (
-                            self._block_and_warn_counts.get(v.constraint_name, 0) + 1
-                        )
-                        self._last_blocked_call = {
-                            "tool_name": tool_name,
-                            "tool_args_canonical": canonical,
-                            "constraint_name": v.constraint_name,
-                            "step_number": step_num,
-                            "set_in_turn": self._current_turn_id,
-                        }
-                        self._soft_blocked_calls.append({
-                            "step": step_num,
-                            "tool_name": tool_name,
-                            "tool_args": tool_arguments if isinstance(tool_arguments, dict) else {},
-                            "constraint": v.constraint_name,
-                            "detail": v.detail,
-                            "mode": "block_and_warn",
-                            "overridden_next_step": False,
-                        })
-                        logger.warning(
-                            "BLOCK_AND_WARN: constraint '%s' violated by tool '%s' (step %d). "
-                            "Model may override by repeating the exact call.",
-                            v.constraint_name, tool_name, step_num,
-                        )
-                        raise _SoftBlockSignal(
-                            tool_call=tool_call,
-                            violation=v,
-                            count=0,
-                            consec=0,
-                            threshold_str="",
-                            mode="block_and_warn",
-                        )
-                    elif v.severity == ConstraintSeverity.PERSISTENT_BLOCK.value:
-                        # Like BLOCK_AND_WARN but with NO override: do not set
-                        # self._last_blocked_call, so repeating the call is blocked again.
-                        self._persistent_block_counts[v.constraint_name] = (
-                            self._persistent_block_counts.get(v.constraint_name, 0) + 1
-                        )
-                        self._soft_blocked_calls.append({
-                            "step": step_num,
-                            "tool_name": tool_name,
-                            "tool_args": tool_arguments if isinstance(tool_arguments, dict) else {},
-                            "constraint": v.constraint_name,
-                            "detail": v.detail,
-                            "mode": "persistent_block",
-                        })
-                        logger.warning(
-                            "PERSISTENT_BLOCK: constraint '%s' violated by tool '%s' (step %d). "
-                            "Block cannot be overridden.",
-                            v.constraint_name, tool_name, step_num,
-                        )
-                        raise _SoftBlockSignal(
-                            tool_call=tool_call,
-                            violation=v,
-                            count=0,
-                            consec=0,
-                            threshold_str="",
-                            mode="persistent_block",
-                        )
-                    else:
-                        logger.warning(
-                            "TOLERATE: constraint '%s' violated by tool '%s' (step %d). Continuing.",
-                            v.constraint_name, tool_name, step_num,
-                        )
-
-            # If we reach execution and this call wasn't the BLOCK_AND_WARN
-            # insistence-override target, the model effectively chose to do
-            # something else first — invalidate the pointer so we honour the
-            # "very next call must be identical" guarantee surfaced in the
-            # warning message.
-            if not is_insistence_override and self._last_blocked_call is not None:
-                self._last_blocked_call = None
-
-            self.logger.log(
-                Panel(Text(f"Calling tool: '{tool_name}' with arguments: {tool_arguments}")),
-                level=LogLevel.INFO,
-            )
-            tool_call_result = self.execute_tool_call(tool_name, tool_arguments)
-            tool_call_result_type = type(tool_call_result)
-
-            if tool_call_result_type in [AgentImage, AgentAudio]:
-                observation_name = "image.png" if tool_call_result_type == AgentImage else "audio.mp3"
-                self.state[observation_name] = tool_call_result
-                observation = f"Stored '{observation_name}' in memory."
-            else:
-                observation = str(tool_call_result).strip()
-
-            self.logger.log(
-                f"Observations: {observation.replace('[', '|')}",
-                level=LogLevel.INFO,
-            )
-            is_final_answer = tool_name == "final_answer"
-
-            self._completed_tool_calls.append({
-                "tool_name": tool_name,
-                "tool_args": tool_arguments if isinstance(tool_arguments, dict) else {},
-                "tool_id": tool_call.id,
-                "tool_result": observation,
-            })
-
-            return ToolOutput(
-                id=tool_call.id,
-                output=tool_call_result,
-                is_final_answer=is_final_answer,
-                observation=observation,
-                tool_call=tool_call,
-            )
-
-        # Execute sequentially when constraints active (deterministic partial-trace ordering)
-        all_outputs: dict[str, ToolOutput] = {}
+        outputs: dict[str, ToolOutput] = {}
         for tool_call in parallel_calls.values():
-            try:
-                tool_output = process_single_tool_call_constrained(tool_call)
-                all_outputs[tool_output.id] = tool_output
-                yield tool_output
-                # Successful execution: reset consecutive streak
-                if self.soft_block_mode in (SoftBlockMode.CONSECUTIVE, SoftBlockMode.HYBRID):
-                    self._consecutive_soft_block_counts.clear()
-            except _SoftBlockSignal as sig:
-                if sig.mode == "block_and_warn":
-                    feedback = (
-                        f"[CONSTRAINT WARNING — {sig.violation.constraint_name}]\n"
-                        f"{sig.violation.detail}\n"
-                        f"The tool call '{sig.tool_call.name}' was NOT executed.\n"
-                        f"You may either: (a) call a DIFFERENT tool or arguments that "
-                        f"satisfies the constraint, or (b) if you have considered this "
-                        f"and still want to proceed, repeat this EXACT same tool call "
-                        f"(identical name and arguments) and it will be executed. "
-                        f"The override only applies if your very next call is byte-identical."
-                    )
-                elif sig.mode == "persistent_block":
-                    feedback = (
-                        f"[CONSTRAINT WARNING — {sig.violation.constraint_name}]\n"
-                        f"{sig.violation.detail}\n"
-                        f"The tool call '{sig.tool_call.name}' was NOT executed.\n"
-                        f"This block cannot be overridden: repeating the exact same call "
-                        f"will not execute it. Call a DIFFERENT tool or arguments that "
-                        f"satisfies the constraint."
-                    )
-                else:
-                    feedback = (
-                        f"[CONSTRAINT VIOLATION — {sig.violation.constraint_name}]"
-                        f" ({sig.threshold_str})\n"
-                        f"{sig.violation.detail}\n"
-                        f"The tool call '{sig.tool_call.name}' was NOT executed. "
-                        f"Please reconsider and call a different tool or arguments "
-                        f"that satisfy the constraints."
-                    )
-                feedback_output = ToolOutput(
-                    id=sig.tool_call.id,
-                    output=feedback,
-                    observation=feedback,
-                    is_final_answer=False,
-                    tool_call=sig.tool_call,
-                )
-                all_outputs[sig.tool_call.id] = feedback_output
-                yield feedback_output
+            output = self._judge_and_run(tool_call, getattr(memory_step, "step_number", 0))
+            outputs[output.id] = output
+            yield output
 
-        memory_step.tool_calls = [parallel_calls[k] for k in sorted(parallel_calls.keys())]
+        memory_step.tool_calls = [parallel_calls[k] for k in sorted(parallel_calls)]
         memory_step.observations = memory_step.observations or ""
-        for tool_output in [all_outputs[k] for k in sorted(all_outputs.keys())]:
+        for tool_output in [outputs[k] for k in sorted(outputs)]:
             memory_step.observations += tool_output.observation + "\n"
         memory_step.observations = (
-            memory_step.observations.rstrip("\n") if memory_step.observations else memory_step.observations
+            memory_step.observations.rstrip("\n") if memory_step.observations
+            else memory_step.observations
         )
 
-    def get_constraint_status(self) -> Dict[str, Any]:
-        """Return a summary of the constraint evaluation state after a run.
+    def _judge_and_run(self, tool_call: ToolCall, step: int) -> ToolOutput:
+        name = tool_call.name
+        args = tool_call.arguments if isinstance(tool_call.arguments, dict) else {}
+        if name == "final_answer":
+            decision = self.enforcer.check_termination()
+            if not decision.allowed:
+                return self._feedback(tool_call, decision.feedback)
+        else:
+            decision = self.enforcer.check(name, args, step)
+            if decision.action == "stop":
+                self._stop(tool_call, args, step, decision)
+            if not decision.allowed:
+                return self._feedback(tool_call, decision.feedback)
 
-        Returns
-        -------
-        dict with keys:
-            ``status``                       – ``"completed"`` or ``"stopped"``
-            ``stopped_by``                   – name of the halting constraint (or ``None``)
-            ``blocked_tool_call``            – HARD_STOP blocked call dict (or ``None``)
-            ``violations``                   – list of violation dicts (all severities)
-            ``completed_trace``              – list of successfully-executed tool call dicts
-            ``constraint_checks``            – total number of constraint evaluations performed
-            ``soft_blocked_calls``           – list of SOFT_BLOCK attempt dicts
-            ``soft_block_counts``            – mapping constraint_name → # of soft blocks
-            ``soft_block_mode``              – active escalation mode value string
-            ``consecutive_soft_block_counts`` – mapping constraint_name → current consecutive count
-            ``block_and_warn_counts``        – mapping constraint_name → # of BLOCK_AND_WARN warnings issued
-            ``block_and_warn_overrides``     – list of insisted-through allow records
-            ``block_and_warn_override_count`` – ``len(block_and_warn_overrides)``
-        """
-        return {
-            "status": self._run_status,
-            "stopped_by": self._stopped_by,
-            "blocked_tool_call": self._blocked_tool_call,
-            "violations": [
-                {
-                    "constraint_name": v.constraint_name,
-                    "severity": v.severity,
-                    "step_number": v.step_number,
-                    "tool_name": v.tool_name,
-                    "tool_args": v.tool_args,
-                    "detail": v.detail,
-                }
-                for v in self._constraint_violations
-            ],
-            "completed_trace": list(self._completed_tool_calls),
-            "constraint_checks": self._constraint_checks_count,
-            "soft_blocked_calls": list(self._soft_blocked_calls),
-            "soft_block_counts": dict(self._soft_block_counts),
-            "soft_block_mode": self.soft_block_mode.value,
-            "consecutive_soft_block_counts": dict(self._consecutive_soft_block_counts),
-            "block_and_warn_counts": dict(self._block_and_warn_counts),
-            "block_and_warn_overrides": list(self._block_and_warn_overrides),
-            "block_and_warn_override_count": len(self._block_and_warn_overrides),
-            "persistent_block_counts": dict(self._persistent_block_counts),
+        self.logger.log(
+            Panel(Text(f"Calling tool: '{name}' with arguments: {tool_call.arguments}")),
+            level=LogLevel.INFO,
+        )
+        result = self.execute_tool_call(name, tool_call.arguments or {})
+        if type(result) in (AgentImage, AgentAudio):
+            observation_name = "image.png" if type(result) == AgentImage else "audio.mp3"
+            self.state[observation_name] = result
+            observation = f"Stored '{observation_name}' in memory."
+        else:
+            observation = str(result).strip()
+        self.logger.log(f"Observations: {observation.replace('[', '|')}", level=LogLevel.INFO)
+        if name != "final_answer":
+            self.enforcer.record_completed(name, args, tool_call.id, observation)
+        return ToolOutput(id=tool_call.id, output=result, is_final_answer=name == "final_answer",
+                          observation=observation, tool_call=tool_call)
+
+    def _stop(self, tool_call: ToolCall, args: Dict[str, Any], step: int, decision: Any) -> None:
+        v = decision.violation
+        self._blocked_tool_call = {
+            "tool_name": tool_call.name, "tool_args": args, "tool_id": tool_call.id,
+            "tool_result": "BLOCKED_BY_CONSTRAINT", "blocked_by": v.constraint_name,
+            "step_number": step,
         }
+        self.interrupt_switch = True
+        raise ConstraintViolationError(
+            constraint_name=v.constraint_name, tool_name=tool_call.name, tool_args=args,
+            detail=v.detail,
+            violation_type="SOFT_BLOCK_ESCALATION" if decision.escalated else "HARD_STOP",
+            soft_block_mode=self.soft_block_mode.value if decision.escalated else None,
+            threshold_str=(f"total {decision.attempts}/{self.enforcer.max_soft_attempts}"
+                           if decision.escalated else ""),
+            logger_to_use=self.logger,
+        )
+
+    @staticmethod
+    def _feedback(tool_call: ToolCall, text: str) -> ToolOutput:
+        return ToolOutput(id=tool_call.id, output=text, observation=text, is_final_answer=False,
+                          tool_call=tool_call)
+
+    def get_constraint_status(self) -> Dict[str, Any]:
+        """The enforcer's status (see :meth:`agentltl.Enforcer.get_constraint_status`),
+        plus ``blocked_tool_call``: the call a stop refused, if any."""
+        return {**self.enforcer.get_constraint_status(),
+                "blocked_tool_call": self._blocked_tool_call}

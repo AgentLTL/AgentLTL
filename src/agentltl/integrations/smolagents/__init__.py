@@ -14,13 +14,12 @@ Shared enforcement types (re-exported from ``agentltl.enforcement``):
 * :class:`SoftBlockMode`
 * :class:`ConstraintViolation`
 
-Higher-level agent wrappers (re-exported from the backend for backward compat):
-
-* :class:`Agent`
-* :class:`AgentWithAdditionalTools`
-* :class:`AgentWithSubAgents`
-* :class:`AgentWithConstraints`
-* :class:`MCPServerConfig`
+Higher-level agent wrappers: :class:`SmolAgentsAgent`,
+:class:`SmolAgentsAgentWithAdditionalTools`, :class:`SmolAgentsAgentWithSubAgents`,
+:class:`SmolAgentsAgentWithConstraints`, :class:`MCPServerConfig`. They are also available
+as ``Agent``, ``AgentWithAdditionalTools``, ``AgentWithSubAgents`` and
+``AgentWithConstraints`` for older code; prefer the full names, which don't clash with
+:mod:`agentltl`'s own backend-agnostic ``Agent`` classes.
 
 Install with::
 
@@ -40,14 +39,19 @@ from .constrained_agent import (
     ConstraintViolationError,
 )
 
-# Higher-level agent wrappers — backward-compatible aliases.
+# Higher-level agent wrappers, and the older aliases.
 from .backend import (
-    SmolAgentsAgent as Agent,
-    SmolAgentsAgentWithAdditionalTools as AgentWithAdditionalTools,
-    SmolAgentsAgentWithSubAgents as AgentWithSubAgents,
-    SmolAgentsAgentWithConstraints as AgentWithConstraints,
+    SmolAgentsAgent,
+    SmolAgentsAgentWithAdditionalTools,
+    SmolAgentsAgentWithSubAgents,
+    SmolAgentsAgentWithConstraints,
     MCPServerConfig,
 )
+
+Agent = SmolAgentsAgent
+AgentWithAdditionalTools = SmolAgentsAgentWithAdditionalTools
+AgentWithSubAgents = SmolAgentsAgentWithSubAgents
+AgentWithConstraints = SmolAgentsAgentWithConstraints
 
 __all__ = [
     "ToolCallingAgentWithConstraints",
@@ -55,6 +59,10 @@ __all__ = [
     "SoftBlockMode",
     "ConstraintViolation",
     "ConstraintViolationError",
+    "SmolAgentsAgent",
+    "SmolAgentsAgentWithAdditionalTools",
+    "SmolAgentsAgentWithSubAgents",
+    "SmolAgentsAgentWithConstraints",
     "Agent",
     "AgentWithAdditionalTools",
     "AgentWithSubAgents",

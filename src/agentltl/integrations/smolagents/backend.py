@@ -63,16 +63,18 @@ def _create_model(
       → :class:`InferenceClientModel` via the HuggingFace Inference API.
 
     Args:
-        model:       Model name / ID.  Falls back to ``$MODEL``, then the
-                     built-in default.
+        model:       Model name / ID.  Falls back to ``$MODEL``; one of the two
+                     is required.
         api_key:     API key for the model provider.  Falls back to
                      ``$HF_TOKEN``.
         provider:    HF Inference provider name.  Falls back to
-                     ``$HF_INFERENCE_PROVIDER``, then ``"novita"``.
+                     ``$HF_INFERENCE_PROVIDER``, else the client's own choice.
         model_seed:  Optional seed forwarded to the model for reproducible
                      sampling (supported by both backends).
     """
-    model_name = model or os.getenv("MODEL") or "Qwen/Qwen3-Next-80B-A3B-Instruct"
+    model_name = model or os.getenv("MODEL")
+    if not model_name:
+        raise ValueError("No model: pass `model` (or `model_instance`), or set $MODEL.")
     model_type = os.getenv("MODEL_TYPE", "hf_inference").lower()
 
     if model_type in ("vllm", "openai_server", "openai"):
@@ -90,12 +92,13 @@ def _create_model(
 
     # HuggingFace Inference API (default)
     resolved_api_key = api_key or os.getenv("HF_TOKEN")
-    resolved_provider = provider or os.getenv("HF_INFERENCE_PROVIDER") or "novita"
+    resolved_provider = provider or os.getenv("HF_INFERENCE_PROVIDER")
     model_kwargs: Dict[str, Any] = {
         "model_id": model_name,
         "token": resolved_api_key,
-        "provider": resolved_provider,
     }
+    if resolved_provider:
+        model_kwargs["provider"] = resolved_provider
     # Without an explicit timeout the underlying httpx client can hang
     # indefinitely if the provider drops the connection mid-stream — we've
     # observed this on Together. Default 180s; tune via HF_INFERENCE_TIMEOUT.
@@ -577,7 +580,7 @@ class SmolAgentsAgent:
 
     # ── Run ──────────────────────────────────────────────────────────────────
 
-    def run(self, task: str) -> Dict[str, Any]:
+    def run(self, task: str, **run_kwargs: Any) -> Dict[str, Any]:
         """Run *task* and return ``{"answer", "metrics", "error"}``.
 
         On success ``error`` is ``None`` and ``answer`` holds the agent's
@@ -586,7 +589,7 @@ class SmolAgentsAgent:
         returned if any steps completed before the error.
         """
         try:
-            result = self.agent.run(task, return_full_result=True)
+            result = self.agent.run(task, return_full_result=True, **run_kwargs)
         except Exception as exc:
             import traceback as _tb
 
@@ -605,18 +608,18 @@ class SmolAgentsAgent:
                 partial_metrics["total_tokens"] = (
                     partial_metrics["input_tokens"] + partial_metrics["output_tokens"]
                 )
-                return {"answer": None, "metrics": partial_metrics, "error": err_msg}
-
-            empty_metrics: Dict[str, Any] = {
-                "steps": [],
-                "tool_calls": [],
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "total_tokens": 0,
-                "num_steps": 0,
-                "num_tool_calls": 0,
-            }
-            return {"answer": None, "metrics": empty_metrics, "error": err_msg}
+            else:
+                partial_metrics = {
+                    "steps": [],
+                    "tool_calls": [],
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                    "num_steps": 0,
+                    "num_tool_calls": 0,
+                }
+            self._finish_metrics(partial_metrics)
+            return {"answer": None, "metrics": partial_metrics, "error": err_msg}
 
         answer = result.output if hasattr(result, "output") else result
         steps = getattr(result, "steps", [])
@@ -651,7 +654,11 @@ class SmolAgentsAgent:
                 )
 
         metrics["total_tokens"] = metrics["input_tokens"] + metrics["output_tokens"]
+        self._finish_metrics(metrics)
         return {"answer": answer, "metrics": metrics, "error": None}
+
+    def _finish_metrics(self, metrics: Dict[str, Any]) -> None:
+        """Add a subclass's fields to the metrics of a run (finished or failed)."""
 
     # ── Cleanup ──────────────────────────────────────────────────────────────
 
@@ -949,6 +956,9 @@ class SmolAgentsAgentWithConstraints(SmolAgentsAgent):
         model_seed: Optional[int] = None,
         model_instance: Optional[Any] = None,
         strict_runtime_safety: bool = False,
+        nudge_max: int = 1,
+        max_termination_nudges: int = 0,
+        enforcer_kwargs: Optional[Dict[str, Any]] = None,
         _skip_runtime_safety_check: bool = False,
     ) -> None:
         mcp_clients, mcp_tools = _connect_mcp_servers(mcp_servers or {})
@@ -981,6 +991,9 @@ class SmolAgentsAgentWithConstraints(SmolAgentsAgent):
             max_consecutive_soft_attempts=max_consecutive_soft_attempts,
             max_steps=max_steps,
             strict_runtime_safety=strict_runtime_safety,
+            nudge_max=nudge_max,
+            max_termination_nudges=max_termination_nudges,
+            enforcer_kwargs=enforcer_kwargs,
             _skip_runtime_safety_check=_skip_runtime_safety_check,
         )
 
@@ -1008,79 +1021,10 @@ class SmolAgentsAgentWithConstraints(SmolAgentsAgent):
             run_kwargs["constraints"] = constraints
         if constraint_severities is not None:
             run_kwargs["constraint_severities"] = constraint_severities
+        return super().run(task, **run_kwargs)
 
-        try:
-            result = self.agent.run(task, return_full_result=True, **run_kwargs)
-        except Exception as exc:
-            import traceback as _tb
-
-            err_msg = str(exc)
-            logger.error(
-                "SmolAgentsAgentWithConstraints run failed: %s\n%s",
-                err_msg,
-                _tb.format_exc(),
-            )
-            partial_steps: List[Any] = []
-            try:
-                partial_steps = list(getattr(self.agent.memory, "steps", []))
-            except Exception:
-                pass
-
-            constraint_status = self.agent.get_constraint_status()
-
-            if partial_steps:
-                partial_metrics = self._extract_metrics_from_steps(partial_steps)
-                partial_metrics["total_tokens"] = (
-                    partial_metrics["input_tokens"] + partial_metrics["output_tokens"]
-                )
-            else:
-                partial_metrics = {
-                    "steps": [],
-                    "tool_calls": [],
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "total_tokens": 0,
-                    "num_steps": 0,
-                    "num_tool_calls": 0,
-                }
-
-            self._merge_constraint_status(partial_metrics, constraint_status)
-            return {"answer": None, "metrics": partial_metrics, "error": err_msg}
-
-        answer = result.output if hasattr(result, "output") else result
-        steps = getattr(result, "steps", [])
-        metrics = self._extract_metrics_from_steps(steps)
-
-        token_usage = getattr(result, "token_usage", None)
-        if token_usage is not None:
-            ru_input = (
-                getattr(token_usage, "input_tokens", None)
-                if not isinstance(token_usage, dict)
-                else token_usage.get("input_tokens")
-            )
-            ru_output = (
-                getattr(token_usage, "output_tokens", None)
-                if not isinstance(token_usage, dict)
-                else token_usage.get("output_tokens")
-            )
-            if ru_input is not None and ru_input != metrics["input_tokens"]:
-                logger.warning(
-                    "Token count mismatch: RunResult.input_tokens=%d, "
-                    "per-step sum=%d.",
-                    ru_input,
-                    metrics["input_tokens"],
-                )
-            if ru_output is not None and ru_output != metrics["output_tokens"]:
-                logger.warning(
-                    "Token count mismatch: RunResult.output_tokens=%d, "
-                    "per-step sum=%d.",
-                    ru_output,
-                    metrics["output_tokens"],
-                )
-
-        metrics["total_tokens"] = metrics["input_tokens"] + metrics["output_tokens"]
+    def _finish_metrics(self, metrics: Dict[str, Any]) -> None:
         self._merge_constraint_status(metrics, self.agent.get_constraint_status())
-        return {"answer": answer, "metrics": metrics, "error": None}
 
     @staticmethod
     def _merge_constraint_status(

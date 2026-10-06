@@ -284,3 +284,43 @@ def test_strict_scores_are_unchanged_by_the_partial_semantics():
     metrics = {"tool_calls": [{"tool_name": "a"}]}
     assert not verify_trace(metrics, [Constraint("k", Before("a", "b"))])["constraints"][0]["passed"]
     assert value(Before("a", "b"), [("a", 0)]).value == PENDING
+
+
+# ── Printing and parsing ─────────────────────────────────────────────────────
+
+text_atoms = st.one_of(
+    tool.map(Called), tool.map(Now),
+    st.builds(CalledWith, tool, st.fixed_dictionaries(
+        {"x": st.one_of(st.sampled_from([0, 1, True, None]), st.sampled_from(["a", "b c"]))})),
+    st.builds(CalledNTimes, tool, st.integers(0, 2), st.sampled_from(["==", ">=", "<=", ">", "<"])),
+    st.builds(Before, tool, tool), st.builds(After, tool, tool),
+    st.builds(AllBefore, st.lists(tool, min_size=1, max_size=2).map(tuple), tool),
+    st.builds(InstanceBefore, tool, st.integers(1, 2), tool, st.integers(1, 2)),
+    st.lists(tool, min_size=1, max_size=3).map(CalledInOrder),
+    st.builds(WithinSteps, tool, tool, st.integers(0, 2)),
+)
+
+
+def _extend_text(children):
+    return st.one_of(
+        children.map(Not), children.map(Globally), children.map(Eventually), children.map(Next),
+        children.map(Previous), children.map(Once), children.map(Historically),
+        st.builds(And, children, children), st.builds(Or, children, children),
+        st.builds(Implies, children, children), st.builds(Until, children, children),
+        st.builds(WeakUntil, children, children), st.builds(Release, children, children),
+        st.builds(Since, children, children),
+        st.builds(CountBefore, children, st.integers(0, 2), st.sampled_from(["<", ">="])),
+    )
+
+
+@SETTINGS
+@given(st.recursive(text_atoms, _extend_text, max_leaves=6))
+def test_printed_formulas_parse_back_to_themselves(f):
+    assert parse(str(f)) == f
+    assert hash(parse(str(f))) == hash(f)
+
+
+def test_the_parser_rejects_characters_it_does_not_know():
+    import pytest
+    with pytest.raises(SyntaxError, match="Unexpected character"):
+        parse('called("a") ; called("b")')

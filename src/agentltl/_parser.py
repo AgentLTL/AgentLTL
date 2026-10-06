@@ -31,8 +31,20 @@ Supported grammar (case-insensitive keywords)::
                | 'always'       '(' STRING ')'
                | 'all_before'   '(' '[' STRING (',' STRING)* ']' ',' STRING ')'
                | 'branch_called'  '(' STRING (',' STRING)? ')'
+               | 'called_with'  '(' STRING (',' IDENT '=' value)* ')'
+               | 'called_n'     '(' STRING ',' CMP NUMBER ')'      -- called_n("x", <= 2)
+               | 'in_order'     '(' '[' STRING (',' STRING)* ']' ')'
+               | 'within_steps' '(' STRING ',' STRING ',' NUMBER ')'
+               | 'instance_before' '(' STRING '[' NUMBER ']' ',' STRING '[' NUMBER ']' ')'
+               | 'count_before' '(' formula ',' CMP NUMBER ')'     -- past positions where it held
 
+    value    ::= STRING | NUMBER | 'true' | 'false' | 'null'
+    CMP      ::= '==' | '>=' | '<=' | '>' | '<'
     STRING   ::= '"' [^"]* '"'
+
+``str(formula)`` prints this syntax, so ``parse(str(f)) == f`` for every formula built
+from these nodes (predicates, call patterns and quantifiers hold Python callables and
+cannot be written as text).
 
 Example::
 
@@ -52,6 +64,12 @@ from ._ast import (
     Before,
     BranchCalled,
     Called,
+    CalledInOrder,
+    CalledNTimes,
+    CalledWith,
+    CountBefore,
+    InstanceBefore,
+    WithinSteps,
     Eventually,
     Formula,
     Globally,
@@ -85,6 +103,9 @@ class _TokenType:
     AMP = "AMP"
     PIPE = "PIPE"
     ARROW = "ARROW"
+    CMP = "CMP"
+    EQ = "EQ"
+    NUMBER = "NUMBER"
     IDENT = "IDENT"
     EOF = "EOF"
 
@@ -108,6 +129,9 @@ class _Token:
 _TOKEN_SPEC = [
     ("STRING",  r'"[^"]*"'),
     ("ARROW",   r"->"),
+    ("CMP",     r"<=|>=|==|<|>"),
+    ("EQ",      r"="),
+    ("NUMBER",  r"-?\d+(?:\.\d+)?"),
     ("LPAREN",  r"\("),
     ("RPAREN",  r"\)"),
     ("LBRACK",  r"\["),
@@ -118,6 +142,7 @@ _TOKEN_SPEC = [
     ("PIPE",    r"\|"),
     ("IDENT",   r"[A-Za-z_][A-Za-z_0-9]*"),
     ("SKIP",    r"[ \t\n]+"),
+    ("ERROR",   r"."),
 ]
 
 _TOKEN_RE = re.compile("|".join(f"(?P<{name}>{pat})" for name, pat in _TOKEN_SPEC))
@@ -130,6 +155,8 @@ def _tokenize(text: str) -> List[_Token]:
         value = m.group()
         if kind == "SKIP":
             continue
+        if kind == "ERROR":
+            raise SyntaxError(f"Unexpected character {value!r} at position {m.start()} in: {text!r}")
         if kind == "STRING":
             value = value[1:-1]  # strip quotes
         tokens.append(_Token(kind, value, m.start()))
@@ -225,6 +252,31 @@ class _Parser:
                 return cls(self._parse_unary())
 
         return self._parse_binary()
+
+    def _value(self):
+        tok = self._advance()
+        if tok.type == _TokenType.STRING:
+            return tok.value
+        if tok.type == _TokenType.NUMBER:
+            return float(tok.value) if "." in tok.value else int(tok.value)
+        if tok.type == _TokenType.IDENT and tok.value in ("true", "false", "null"):
+            return {"true": True, "false": False, "null": None}[tok.value]
+        raise SyntaxError(f"Expected a value at position {tok.pos} in: {self.source!r}")
+
+    def _string_list(self) -> List[str]:
+        self._expect(_TokenType.LBRACK)
+        items = [self._expect(_TokenType.STRING).value]
+        while self._match(_TokenType.COMMA):
+            items.append(self._expect(_TokenType.STRING).value)
+        self._expect(_TokenType.RBRACK)
+        return items
+
+    def _indexed(self):
+        tool = self._expect(_TokenType.STRING).value
+        self._expect(_TokenType.LBRACK)
+        n = int(self._expect(_TokenType.NUMBER).value)
+        self._expect(_TokenType.RBRACK)
+        return tool, n
 
     def _peek_next_is_operand(self) -> bool:
         """``O(...)``, ``H now(...)``: the letter is an operator, not a function name."""
@@ -341,6 +393,53 @@ class _Parser:
                 wrong = self._expect(_TokenType.STRING).value
             self._expect(_TokenType.RPAREN)
             return BranchCalled(correct, wrong)
+
+        if name == "called_with":
+            tool = self._expect(_TokenType.STRING).value
+            args = {}
+            while self._match(_TokenType.COMMA):
+                key = self._expect(_TokenType.IDENT).value
+                self._expect(_TokenType.EQ)
+                args[key] = self._value()
+            self._expect(_TokenType.RPAREN)
+            return CalledWith(tool, args)
+
+        if name == "called_n":
+            tool = self._expect(_TokenType.STRING).value
+            self._expect(_TokenType.COMMA)
+            op = self._expect(_TokenType.CMP).value
+            n = int(self._expect(_TokenType.NUMBER).value)
+            self._expect(_TokenType.RPAREN)
+            return CalledNTimes(tool, n, op)
+
+        if name == "in_order":
+            tools = self._string_list()
+            self._expect(_TokenType.RPAREN)
+            return CalledInOrder(tools)
+
+        if name == "within_steps":
+            a = self._expect(_TokenType.STRING).value
+            self._expect(_TokenType.COMMA)
+            b = self._expect(_TokenType.STRING).value
+            self._expect(_TokenType.COMMA)
+            n = int(self._expect(_TokenType.NUMBER).value)
+            self._expect(_TokenType.RPAREN)
+            return WithinSteps(a, b, n)
+
+        if name == "instance_before":
+            a, n = self._indexed()
+            self._expect(_TokenType.COMMA)
+            b, m = self._indexed()
+            self._expect(_TokenType.RPAREN)
+            return InstanceBefore(a, n, b, m)
+
+        if name == "count_before":
+            operand = self._parse_impl()
+            self._expect(_TokenType.COMMA)
+            op = self._expect(_TokenType.CMP).value
+            n = int(self._expect(_TokenType.NUMBER).value)
+            self._expect(_TokenType.RPAREN)
+            return CountBefore(operand, n, op)
 
         raise SyntaxError(
             f"Unknown function '{name_tok.value}' "

@@ -39,9 +39,13 @@ pip install agentltl
 # With smolagents runtime enforcement
 pip install "agentltl[smolagents]"
 
-# With LangChain runtime enforcement
-pip install "agentltl[langchain]"
+# With the native OpenAI-compatible agent loop
+pip install "agentltl[native]"
 ```
+
+0.2 removed the LangChain integration: drive an `Enforcer` from your LangChain loop
+instead (see [Enforcer](#enforcer-any-agent-loop)), or use the native or smolagents
+backends.
 
 ---
 
@@ -95,27 +99,6 @@ agent = AgentWithConstraints(
 )
 
 result = agent.run("Fetch and then process the data, then save.")
-print(result["metrics"]["run_status"])           # "completed" or "stopped"
-print(result["metrics"]["constraint_violations"]) # list of violations
-```
-
-### Runtime enforcement — LangChain
-
-```python
-from langchain_openai import ChatOpenAI
-from agentltl import Constraint, Before, AgentWithConstraints, ConstraintSeverity
-
-agent = AgentWithConstraints(
-    tools=[fetch_tool, process_tool],  # LangChain BaseTool instances
-    constraints=[Constraint("fetch_before_process", Before("fetch_data", "process_data"))],
-    constraint_severities={"fetch_before_process": ConstraintSeverity.SOFT_BLOCK},
-    max_soft_attempts=3,
-    soft_block_mode="hybrid",
-    model_instance=ChatOpenAI(model="gpt-4o-mini"),
-    backend="langchain",
-)
-
-result = agent.run("Fetch and then process the data.")
 print(result["metrics"]["run_status"])           # "completed" or "stopped"
 print(result["metrics"]["constraint_violations"]) # list of violations
 ```
@@ -466,8 +449,9 @@ else:
 
 ### AgentWithConstraints (backend-agnostic)
 
-The top-level `AgentWithConstraints` supports both smolagents and LangChain backends
-via the `backend=` parameter (default: `"smolagents"`):
+The top-level `AgentWithConstraints` supports the smolagents and native backends via the
+`backend=` parameter (default: `"smolagents"`). Both drive an `Enforcer`; its settings can be
+given in one `EnforcementConfig`:
 
 ```python
 from agentltl import AgentWithConstraints, ConstraintSeverity, Constraint, Before
@@ -480,15 +464,18 @@ agent = AgentWithConstraints(
     backend="smolagents",
 )
 
-# LangChain backend
-from langchain_openai import ChatOpenAI
+# native backend (any OpenAI-compatible endpoint), settings in one place
+from agentltl import EnforcementConfig
 
 agent = AgentWithConstraints(
-    tools=my_lc_tools,       # LangChain BaseTool instances
-    constraints=my_constraints,
-    constraint_severities={"order_check": ConstraintSeverity.SOFT_BLOCK},
-    model_instance=ChatOpenAI(model="gpt-4o-mini"),
-    backend="langchain",
+    tools=my_tools,
+    model="my-model", base_url="http://localhost:8000/v1",
+    enforcement=EnforcementConfig(
+        constraints=my_constraints,
+        constraint_severities={"order_check": ConstraintSeverity.SOFT_BLOCK},
+        nudge_max=3,
+    ),
+    backend="native",
 )
 
 result = agent.run("do the task")
@@ -497,8 +484,9 @@ result = agent.run("do the task")
 
 ### ToolCallingAgentWithConstraints (smolagents low-level)
 
-The low-level smolagents integration extends `ToolCallingAgent` to check constraints
-*before* each tool call:
+The low-level smolagents integration extends `ToolCallingAgent`: each tool call the model
+proposes goes to an `Enforcer` before it runs, and a refused call returns the enforcer's
+feedback to the model instead of a result:
 
 ```python
 from agentltl.integrations.smolagents import (
@@ -514,29 +502,6 @@ agent = ToolCallingAgentWithConstraints(
 )
 result = agent.run("do the task", return_full_result=True)
 status = agent.get_constraint_status()
-```
-
-### ConstraintEnforcementMiddleware (LangChain low-level)
-
-The low-level LangChain integration provides an `AgentMiddleware` for use with
-`create_agent()`:
-
-```python
-from agentltl.integrations.langchain import (
-    ConstraintEnforcementMiddleware,
-    ConstraintSeverity,
-)
-from langchain.agents import create_agent
-
-mw = ConstraintEnforcementMiddleware(
-    constraints=my_constraints,
-    constraint_severities={"order_check": ConstraintSeverity.SOFT_BLOCK},
-    max_soft_attempts=3,
-    soft_block_mode="hybrid",
-)
-agent = create_agent(model=my_model, tools=my_tools, middleware=[mw.as_middleware()])
-result = agent.invoke({"messages": [HumanMessage(content="do the task")]})
-status = mw.get_constraint_status()
 ```
 
 ### AgentWithAdditionalTools (smolagents, MCP-enabled)
@@ -661,9 +626,8 @@ can always override it.)
 
 By default each mismatch produces a `logger.warning` and the agent is
 constructed normally.  Pass `strict_runtime_safety=True` to
-`AgentWithConstraints`, `ToolCallingAgentWithConstraints`, or
-`ConstraintEnforcementMiddleware` to turn warnings into a `ValueError`
-at construction time:
+`AgentWithConstraints`, `MultiTurnAgent` or `ToolCallingAgentWithConstraints` to turn
+warnings into a `ValueError` at construction time:
 
 ```python
 from agentltl import (
