@@ -29,7 +29,7 @@ from agentltl import (
     WithinSteps,
     classify_constraints,
 )
-from agentltl._ast import AtPosition, Next, Release, Until, WeakUntil
+from agentltl._ast import AtPosition, Next, Now, Release, Until, WeakUntil
 from agentltl.runtime_safety import (
     _AmbiguousSource,
     check_runtime_safety_or_warn,
@@ -52,8 +52,11 @@ def _pred_fn(_trace, _position, _bindings=None):
 
 # Each row: (id, formula, expected RuntimeSafety)
 _CASES: list[tuple[str, Formula, RuntimeSafety]] = [
-    ("globally_called", Globally(Called("t")), RuntimeSafety.SAFE),
-    ("eventually_called", Eventually(Called("t")), RuntimeSafety.UNSAFE),
+    # G over a fact that is false until t runs: an obligation, refused until met.
+    ("globally_called", Globally(Called("t")), RuntimeSafety.UNSAFE),
+    ("globally_not_called", Globally(Not(Called("t"))), RuntimeSafety.SAFE),
+    # can never fail before the run ends
+    ("eventually_called", Eventually(Called("t")), RuntimeSafety.INERT),
     ("called", Called("t"), RuntimeSafety.UNSAFE),
     ("not_called", Not(Called("t")), RuntimeSafety.SAFE),
     ("within_steps", WithinSteps("a", "b", 3), RuntimeSafety.SAFE),
@@ -67,9 +70,10 @@ _CASES: list[tuple[str, Formula, RuntimeSafety]] = [
     # n == 0: the "forbidden tool" form. Once t is called, count > 0 forever,
     # so the violation is permanent — runtime-detectable.
     ("count_eq_zero", CalledNTimes("t", 0, "=="), RuntimeSafety.SAFE),
-    ("count_ge_zero", CalledNTimes("t", 0, ">="), RuntimeSafety.SAFE),
+    ("count_ge_zero", CalledNTimes("t", 0, ">="), RuntimeSafety.INERT),
     ("count_gt_zero", CalledNTimes("t", 0, ">"), RuntimeSafety.UNSAFE),
-    ("before", Before("a", "b"), RuntimeSafety.UNSAFE),
+    # decided, finally, at the first b
+    ("before", Before("a", "b"), RuntimeSafety.SAFE),
     ("not_before", Not(Before("a", "b")), RuntimeSafety.SAFE),
     (
         "forall_within_steps",
@@ -94,36 +98,37 @@ _CASES: list[tuple[str, Formula, RuntimeSafety]] = [
     ),
     (
         "and_safe_unsafe",
-        And(Globally(Called("a")), Eventually(Called("b"))),
+        And(Globally(Not(Called("a"))), Eventually(Called("b"))),
         RuntimeSafety.SAFE,
     ),
     (
         "or_safe_unsafe",
         Or(Globally(Called("a")), Eventually(Called("b"))),
-        RuntimeSafety.UNSAFE,
+        RuntimeSafety.INERT,
     ),
     (
         "implies_called_eventually",
         Implies(Called("a"), Eventually(Called("b"))),
-        RuntimeSafety.UNSAFE,
+        RuntimeSafety.INERT,
     ),
     # Operators not in the original spec but covered for completeness:
     ("next_called", Next(Called("t")), RuntimeSafety.UNSAFE),
-    ("next_globally", Next(Globally(Called("t"))), RuntimeSafety.SAFE),
+    ("next_globally", Next(Globally(Not(Called("t")))), RuntimeSafety.SAFE),
+    ("next_globally_called", Next(Globally(Called("t"))), RuntimeSafety.UNSAFE),
     ("until", Until(Called("a"), Called("b")), RuntimeSafety.UNSAFE),
     (
         "weak_until_left_safe",
-        WeakUntil(Globally(Called("a")), Called("b")),
+        WeakUntil(Not(Now("b")), Now("a")),
         RuntimeSafety.SAFE,
     ),
     (
         "release_right_safe",
-        Release(Called("a"), Globally(Called("b"))),
+        Release(Now("a"), Not(Now("b"))),
         RuntimeSafety.SAFE,
     ),
     (
         "at_position_safe",
-        AtPosition(2, Globally(Called("a"))),
+        AtPosition(2, Globally(Not(Called("a")))),
         RuntimeSafety.SAFE,
     ),
 ]
@@ -179,12 +184,14 @@ def test_predicate_default_is_trusted_ambiguous():
 
 def test_classify_constraints_without_severities():
     constraints = [
-        Constraint("a", Globally(Called("t"))),
+        Constraint("a", Globally(Not(Called("t")))),
         Constraint("b", Eventually(Called("t"))),
+        Constraint("c", Called("t")),
     ]
     reports = classify_constraints(constraints)
     assert [r.classification for r in reports] == [
         RuntimeSafety.SAFE,
+        RuntimeSafety.INERT,
         RuntimeSafety.UNSAFE,
     ]
     # Without severities every report is informational.
@@ -200,7 +207,7 @@ def test_classify_constraints_unsafe_hardstop_is_incompatible():
         {"liveness": ConstraintSeverity.HARD_STOP},
     )
     [r] = reports
-    assert r.classification == RuntimeSafety.UNSAFE
+    assert r.classification == RuntimeSafety.INERT
     assert r.compatible is False
     assert r.message is not None
     assert "WithinSteps" in r.message
@@ -315,7 +322,7 @@ def test_hook_skips_final_answer_constraints(caplog):
 
 
 def test_hook_silent_for_safe_constraint(caplog):
-    constraints = [Constraint("safety", Globally(Called("end")))]
+    constraints = [Constraint("safety", Globally(Not(Called("end"))))]
     with caplog.at_level(logging.WARNING, logger="agentltl.runtime_safety.test"):
         check_runtime_safety_or_warn(
             constraints,
@@ -471,7 +478,7 @@ def test_agent_with_constraints_safe_constraint_no_warning(monkeypatch, caplog):
     from agentltl import AgentWithConstraints
 
     _patch_backends(monkeypatch)
-    constraints = [Constraint("safety", Globally(Called("end")))]
+    constraints = [Constraint("safety", Globally(Not(Called("end"))))]
     with caplog.at_level(logging.WARNING, logger="agentltl.agents"):
         AgentWithConstraints(
             constraints=constraints,

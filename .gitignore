@@ -34,3 +34,6 @@ Thumbs.db
 .env
 *.pem
 *.key
+
+# Hypothesis
+.hypothesis/

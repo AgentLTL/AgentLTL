@@ -593,7 +593,7 @@ def substitute(formula: Formula, bindings: Dict[str, Any]) -> Formula:
             expected_args=new_args,
         )
 
-    if isinstance(formula, (Called, CalledNTimes, Before, After, AllBefore, BranchCalled,
+    if isinstance(formula, (Called, Now, CalledNTimes, Before, After, AllBefore, BranchCalled,
                              InstanceBefore, CalledInOrder, WithinSteps)):
         return formula  # no Var positions in these atomics
 
@@ -602,9 +602,11 @@ def substitute(formula: Formula, bindings: Dict[str, Any]) -> Formula:
     if isinstance(formula, Predicate):
         # Wrap the fn to inject bindings so user-defined predicates can
         # access the bound variable values via closure.
+        # The evaluator passes metrics as a third argument; under a quantifier the
+        # predicate receives the bindings there instead.
         captured_bindings = dict(bindings)
         original_fn = formula.fn
-        def wrapped_fn(trace, position, _b=captured_bindings, _fn=original_fn):
+        def wrapped_fn(trace, position, metrics=None, _b=captured_bindings, _fn=original_fn):
             return _fn(trace, position, _b)
         return Predicate(
             fn=wrapped_fn,

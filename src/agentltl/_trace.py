@@ -99,41 +99,42 @@ class Trace:
     def __getitem__(self, index: int) -> ToolCall:
         return self.calls[index]
 
+    def _positions(self, tool: str) -> List[int]:
+        """Positions of *tool*, from an index built on first use."""
+        index = self.__dict__.get("_index")
+        if index is None or self.__dict__.get("_indexed") != len(self.calls):
+            index = {}
+            for c in self.calls:
+                index.setdefault(c.name, []).append(c.position)
+            self.__dict__["_index"], self.__dict__["_indexed"] = index, len(self.calls)
+        return index.get(tool, [])
+
     def contains(self, tool: str) -> bool:
         """True iff *tool* appears at least once."""
-        return any(c.name == tool for c in self.calls)
+        return bool(self._positions(tool))
 
     def count(self, tool: str) -> int:
         """Number of times *tool* appears."""
-        return sum(1 for c in self.calls if c.name == tool)
+        return len(self._positions(tool))
 
     def first_index(self, tool: str) -> int:
         """0-based index of the first occurrence of *tool*, or -1."""
-        for c in self.calls:
-            if c.name == tool:
-                return c.position
-        return -1
+        found = self._positions(tool)
+        return found[0] if found else -1
 
     def last_index(self, tool: str) -> int:
         """0-based index of the last occurrence of *tool*, or -1."""
-        for c in reversed(self.calls):
-            if c.name == tool:
-                return c.position
-        return -1
+        found = self._positions(tool)
+        return found[-1] if found else -1
 
     def nth_index(self, tool: str, n: int) -> int:
         """0-based index of the *n*-th occurrence (1-based *n*) of *tool*, or -1."""
-        count = 0
-        for c in self.calls:
-            if c.name == tool:
-                count += 1
-                if count == n:
-                    return c.position
-        return -1
+        found = self._positions(tool)
+        return found[n - 1] if 0 < n <= len(found) else -1
 
     def all_indices(self, tool: str) -> List[int]:
         """All 0-based indices where *tool* appears."""
-        return [c.position for c in self.calls if c.name == tool]
+        return list(self._positions(tool))
 
     def calls_with(self, tool: str, expected_args: Dict[str, Any]) -> List[ToolCall]:
         """Return all calls to *tool* whose args are a superset of *expected_args*."""
@@ -155,6 +156,8 @@ class Trace:
 
     def at(self, position: int) -> Optional[ToolCall]:
         """Return the call at *position*, or None."""
+        if 0 <= position < len(self.calls) and self.calls[position].position == position:
+            return self.calls[position]
         for c in self.calls:
             if c.position == position:
                 return c

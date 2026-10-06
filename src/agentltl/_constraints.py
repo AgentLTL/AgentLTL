@@ -58,12 +58,6 @@ class Constraint:
     weight: float = 1.0
     description: str = ""
     repair: str = ""
-    enforcement: str = ""
-    """Where in the episode a violation becomes decidable, computed by the caller
-    from the formula: "at_call", "on_evidence" or "at_end". Empty means the caller
-    did not compute one, and consumers fall back to whatever rule they used before.
-    A caller that sets it is telling the enforcer that blocking this constraint is
-    licensed by its shape rather than by a naming convention."""
     grounding: str = ""
     """Where the asserted VALUE came from: "schema" (the tool schema prescribes it),
     "quoted" (a literal span of the task text), "derived" (computed by a rule), or

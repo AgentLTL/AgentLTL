@@ -1,11 +1,9 @@
 """
 agentltl/_enforcement_engine.py — framework-agnostic runtime constraint enforcer.
 
-This is the backend-independent core of the runtime enforcement logic that the
-LangChain ``ConstraintEnforcementMiddleware`` implements inline. It has **no
-framework dependency** (no langchain/smolagents import) and lazy-imports
-``verify_trace`` only when constraints are present, so it is safe to import from
-the zero-dependency core or from the native backend.
+The backend-independent core of runtime enforcement. It has **no framework
+dependency**: it judges each call with the five-valued partial-trace semantics of
+:mod:`agentltl._partial`, and refuses a call only for what that call newly breaks.
 
 The native agent loop drives it like this::
 
@@ -31,12 +29,17 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from ._evaluator import LTLEvaluator
+from ._partial import caused_elsewhere
+from ._trace import Trace
 from .enforcement import (
     ConstraintSeverity,
     ConstraintViolation,
     ConstraintViolationError,
     SoftBlockMode,
 )
+
+_EVALUATOR = LTLEvaluator()
 
 logger = logging.getLogger(__name__)
 
@@ -56,42 +59,6 @@ def _clip(text: str, limit: int = 220) -> str:
 Decision = Union[str, Tuple[str, str]]
 
 
-
-def _is_irrecoverable(node: Any, _depth: int = 0) -> bool:
-    """Can a violation of this formula ever be repaired by a LATER call?
-
-    The safety/liveness split, applied to suppression rather than to blocking.
-
-    * a PROHIBITION -- `Not(Called(x))` -- is permanent: once x has run, nothing
-      appended can make it true again;
-    * an ORDERING (`Before`) and an upper-bound COUNT (`CalledNTimes` with a `<=`)
-      are also monotone: a later call cannot move a first index back or remove a
-      call already made;
-    * an OBLIGATION (`Called`, `CalledWith`, and everything compiled to the
-      format-tolerant `called_with_like`) is NOT permanent -- it reads as failing
-      simply because nothing has satisfied it YET, and the candidate call may be
-      exactly what satisfies it.
-
-    Returns False when unsure: suppressing wrongly silences a real block, while
-    failing to suppress only restores the previous behaviour for that constraint.
-    """
-    if node is None or _depth > 12:
-        return False
-    name = type(node).__name__
-    if name == "Not":
-        inner = getattr(node, "operand", None)
-        return type(inner).__name__ in ("Called", "CalledWith")
-    if name in ("Before", "CalledNTimes"):
-        return True
-    for attr in ("operand", "left", "right", "antecedent", "consequent", "body"):
-        child = getattr(node, attr, None)
-        if child is not None and _is_irrecoverable(child, _depth + 1):
-            return True
-    for attr in ("branches", "operands", "children", "conjuncts", "disjuncts"):
-        for child in (getattr(node, attr, None) or []):
-            if _is_irrecoverable(child, _depth + 1):
-                return True
-    return False
 
 class ConstraintEnforcer:
     """Stateful FOLTL runtime enforcer, framework-agnostic.
@@ -174,6 +141,10 @@ class ConstraintEnforcer:
         # ── PERSISTENT_BLOCK state ──
         # Like BLOCK_AND_WARN but with no override: the call is blocked every time.
         self._persistent_block_counts: Dict[str, int] = {}
+        # each constraint on the completed calls alone, for marginal causation
+        self._prefix_cache: Dict[int, Any] = {}
+        self._prefix_cache_len: int = -1
+        self._prefix_trace: Optional[Trace] = None
 
     def set_constraints(
         self,
@@ -321,7 +292,8 @@ class ConstraintEnforcer:
         """Record a successfully-executed call so it joins the prospective trace
         evaluated for subsequent calls."""
         self._completed_tool_calls.append(
-            {"tool_name": tool_name, "arguments": tool_args, "id": tool_id, "result": result}
+            {"tool_name": tool_name, "arguments": tool_args, "id": tool_id, "result": result,
+             "step": self._current_generation}
         )
 
     def get_constraint_status(self) -> Dict[str, Any]:
@@ -398,16 +370,17 @@ class ConstraintEnforcer:
         if not pending:
             return None
 
-        from agentltl import verify_trace  # lazy import -- avoids circular deps
-
         metrics = {"tool_calls": list(self._completed_tool_calls)}
+        trace = Trace.from_metrics(metrics)
         unmet: List[Any] = []
         for constraint in pending:
             # NOT partial_trace: the prefix is final, which is the whole point.
-            result = verify_trace(metrics, [constraint], partial_trace=False)
-            if result.get("compliance_label") in ("FULL", "N/A"):
+            result = _EVALUATOR.evaluate(constraint.formula, trace, metrics=metrics)
+            if result.passed:
                 continue
-            per_c = (result.get("constraints") or [{}])[0]
+            per_c = {"detail": result.detail,
+                     "description": getattr(constraint, "description", ""),
+                     "repair": getattr(constraint, "repair", "")}
             unmet.append((constraint, per_c))
         if not unmet:
             return None
@@ -457,85 +430,64 @@ class ConstraintEnforcer:
     def _evaluate_constraints(
         self, tool_name: str, tool_args: Dict[str, Any], step_number: int
     ) -> List[ConstraintViolation]:
-        """Build a prospective trace (completed + candidate) and evaluate each
-        constraint with ``verify_trace(partial_trace=True)``."""
+        """Judge each constraint on the completed calls plus the candidate."""
         if not self._constraints:
             return []
 
-        from agentltl import verify_trace  # lazy import — avoids circular deps
-
-        completed_calls = list(self._completed_tool_calls)
-        prospective_calls = completed_calls + [
-            {"tool_name": tool_name, "arguments": tool_args}
-        ]
-        metrics = {"tool_calls": prospective_calls}
-        prefix_metrics = {"tool_calls": completed_calls}
+        completed_calls = self._completed_tool_calls
+        candidate = {"tool_name": tool_name, "arguments": tool_args,
+                     "step": self._current_generation}
+        metrics = {"tool_calls": completed_calls + [candidate]}
+        trace = Trace.from_metrics(metrics)
 
         violations: List[ConstraintViolation] = []
         self._constraint_checks += len(self._constraints)
 
         for constraint in self._constraints:
-            result = verify_trace(metrics, [constraint], partial_trace=True)
-            if result.get("compliance_label") not in ("FULL", "N/A"):
-                # MARGINAL CAUSATION. Refuse a call only for what IT newly breaks.
-                #
-                # A safety property that is already irrecoverably violated --
-                # `Not(Called(echo))` once echo has run -- stays false for the rest
-                # of the episode, so evaluating it on `completed + candidate` failed
-                # for EVERY later call, whatever tool it was:
-                #
-                #     echo  BLOCKED  NOT("echo" was called (call #5).)
-                #     cat   BLOCKED  NOT("echo" was called (call #5).)
-                #     wc    BLOCKED  NOT("echo" was called (call #5).)
-                #
-                # `cat` and `wc` are refused for something `echo` did, by a
-                # constraint that does not name them, and the agent is walled off
-                # from its whole toolset. Repeats were 54% of run 19's blocks and
-                # 59% of run 12's; on wb, 42 of 46 enforcement deaths are an agent
-                # looping on a refusal it cannot satisfy.
-                #
-                # Worse in `block_and_warn`, the mode that wins: its verbatim-repeat
-                # escape hatch lets the offending call THROUGH, permanently
-                # falsifying the constraint, so the escape hatch converted one false
-                # alarm into a block storm. Other-tool repeats are 31% of its blocks
-                # against 0.1-2.9% of persistent_block's.
-                #
-                # If the prefix ALONE already violates it, this call is not the
-                # cause and refusing it repairs nothing.
-                # Only for an IRRECOVERABLE violation. A constraint the prefix
-                # fails is not automatically "already broken": an unmet OBLIGATION
-                # (`CalledWith`) reads as failing until something satisfies it, and
-                # `called_with_like` is ANY-call, so the current call is precisely
-                # the chance to meet it. Suppressing those would retire mab's
-                # winning machinery -- a second wrong POST would stop being
-                # redirected, which is 307W/8L of `bind`. Only a violated
-                # PROHIBITION or a breached ordering/cap is permanent.
-                if completed_calls and _is_irrecoverable(constraint.formula):
-                    prior = verify_trace(prefix_metrics, [constraint],
+            result = _EVALUATOR.evaluate(constraint.formula, trace, metrics=metrics,
                                          partial_trace=True)
-                    if prior.get("compliance_label") not in ("FULL", "N/A"):
-                        self._already_violated += 1
-                        continue
-                severity = self._severities.get(constraint.name, self._default_severity)
-                per_c = result.get("constraints", [{}])[0]
-                detail = per_c.get("detail") or per_c.get("reason") or "constraint violated"
-                violations.append(
-                    ConstraintViolation(
-                        constraint_name=constraint.name,
-                        severity=severity.value,
-                        step_number=step_number,
-                        tool_name=tool_name,
-                        tool_args=tool_args,
-                        detail=str(detail),
-                        # Previously dropped here: the spec authors a `rationale`
-                        # (-> description) and now a `repair`, both of which reach
-                        # ConstraintResult and were then thrown away one line above
-                        # this, so the agent only ever saw `detail`.
-                        description=str(per_c.get("description") or ""),
-                        repair=str(per_c.get("repair") or ""),
-                    )
+            if result.passed:
+                continue
+            # MARGINAL CAUSATION: refuse a call only for what IT newly breaks. Once a
+            # failure is final -- `G(!now("deploy"))` after a deploy was let through by a
+            # warn override -- it stays a failure for the rest of the run, and refusing
+            # every later call for it would wall the agent off from its whole toolset
+            # while repairing nothing. Each failing instance (a position of G, an entity
+            # of ForAll, a count) is a witness: when every witness of this failure was
+            # already final before the call, the call isn't its cause. An obligation not
+            # met yet is never final, so a call can still be redirected towards it.
+            if completed_calls and caused_elsewhere(result, self._prefix_value(constraint)):
+                self._already_violated += 1
+                continue
+            severity = self._severities.get(constraint.name, self._default_severity)
+            violations.append(
+                ConstraintViolation(
+                    constraint_name=constraint.name,
+                    severity=severity.value,
+                    step_number=step_number,
+                    tool_name=tool_name,
+                    tool_args=tool_args,
+                    detail=str(result.detail or "constraint violated"),
+                    description=str(getattr(constraint, "description", "") or ""),
+                    repair=str(getattr(constraint, "repair", "") or ""),
                 )
+            )
         return violations
+
+    def _prefix_value(self, constraint: Any) -> Any:
+        """The constraint on the completed calls alone, cached until the next call runs."""
+        n = len(self._completed_tool_calls)
+        if self._prefix_cache_len != n:
+            self._prefix_cache, self._prefix_cache_len = {}, n
+            self._prefix_trace = None
+        key = id(constraint)
+        if key not in self._prefix_cache:
+            metrics = {"tool_calls": self._completed_tool_calls}
+            if self._prefix_trace is None:
+                self._prefix_trace = Trace.from_metrics(metrics)
+            self._prefix_cache[key] = _EVALUATOR.evaluate(
+                constraint.formula, self._prefix_trace, metrics=metrics, partial_trace=True)
+        return self._prefix_cache[key]
 
     # Which kind of mistake to lead with when a call violates several constraints
     # at once. Keyed on the constraint-name prefix ("bind::records_bp_value"), so it

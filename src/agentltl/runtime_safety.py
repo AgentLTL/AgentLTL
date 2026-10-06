@@ -13,13 +13,19 @@ property whose witness might still arrive on the next step.
 This module performs a recursive walk over the formula AST at constraint-
 registration time and labels each formula one of:
 
-* ``SAFE``       – violation is detectable at a finite prefix.
-* ``UNSAFE``     – cannot be falsified at any finite prefix.
+* ``SAFE``       – it only fails finally: a refusal always points at a real violation.
+* ``UNSAFE``     – it can fail presumptively (an obligation not met yet), so blocking
+                   refuses every call until the obligation is met.
+* ``INERT``      – it cannot fail before the run ends; check it at termination.
 * ``AMBIGUOUS``  – the classifier cannot decide.
+
+The labels come from :func:`reachable_values`, the set of values a formula can take in
+the five-valued partial-trace semantics of :mod:`agentltl._partial`, so they agree with
+what the enforcer does.
 
 The public API is intentionally small:
 
-* :class:`RuntimeSafety` – the three labels.
+* :class:`RuntimeSafety` – the labels.
 * :class:`ClassificationReport` – per-constraint result.
 * :func:`classify_constraints` – inspect a list of constraints offline.
 
@@ -41,7 +47,7 @@ from __future__ import annotations
 import enum
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 from ._ast import (
     AllBefore,
@@ -72,6 +78,7 @@ from ._ast import (
     WeakUntil,
     WithinSteps,
 )
+from ._partial import FALSE, PENDING, PFALSE, PTRUE, TRUE
 from .enforcement import ConstraintSeverity
 
 
@@ -85,6 +92,7 @@ class RuntimeSafety(enum.Enum):
 
     SAFE = "SAFE"
     UNSAFE = "UNSAFE"
+    INERT = "INERT"
     AMBIGUOUS = "AMBIGUOUS"
 
 
@@ -154,172 +162,116 @@ def _ambiguous_combine(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def classify_runtime_safety(formula: Formula) -> _Classification:
-    """Classify *formula* by runtime-safety.
+_ALL = frozenset({FALSE, PFALSE, PENDING, PTRUE, TRUE})
 
-    Returns an internal :class:`_Classification`; callers that only need
-    the public label should read ``.safety``.  The internal carrier is
-    used by :func:`check_runtime_safety_or_warn` to distinguish a
-    trusted-predicate AMBIGUOUS from an unknown-node AMBIGUOUS.
+
+def _pairs(op, xs, ys):
+    return frozenset(op(x, y) for x in xs for y in ys)
+
+
+def reachable_values(formula: Formula) -> Tuple[FrozenSet[int], Optional[_Classification]]:
+    """The values *formula* can take on a partial trace (see :mod:`agentltl._partial`).
+
+    An abstract interpretation over the same algebra the evaluator uses, so the
+    classification below agrees with what the enforcer does by construction. The second
+    item is an AMBIGUOUS classification when the formula holds a predicate that declared
+    nothing, or a node this function doesn't know.
     """
-    # ── Atomic propositions ──────────────────────────────────────────────
-    if isinstance(formula, Called):
-        return _Classification.unsafe()
-
-    if isinstance(formula, Now):
-        # Fixed at its position once that call is made: decidable either way.
-        return _Classification.safe()
-
-    if isinstance(formula, CalledNTimes):
-        if formula.op in ("<=", "<"):
-            return _Classification.safe()
-        # ``CalledNTimes(t, 0, "==")`` is the canonical "forbidden tool":
-        # counts only grow, so any call to *t* permanently violates the
-        # constraint — runtime-detectable.  ``CalledNTimes(t, 0, ">=")``
-        # is vacuously true (count is always ≥ 0); its violation set is
-        # empty, so it is also SAFE.  ``>`` with n == 0 ("at least one
-        # call to t") remains liveness and stays UNSAFE.
-        if formula.n == 0 and formula.op in ("==", ">="):
-            return _Classification.safe()
-        # ">=", ">", "==" with n > 0: count can grow toward the bound,
-        # so a runtime checker cannot distinguish "not yet" from "never".
-        return _Classification.unsafe()
-
-    if isinstance(formula, Before):
-        return _Classification.unsafe()
-
-    if isinstance(formula, After):
-        return _Classification.unsafe()
-
-    if isinstance(formula, AllBefore):
-        return _Classification.safe()
-
-    if isinstance(formula, BranchCalled):
-        return _Classification.safe()
-
-    if isinstance(formula, CalledWith):
-        return _Classification.unsafe()
-
-    if isinstance(formula, CalledWithResult):
-        return _Classification.unsafe()
-
-    if isinstance(formula, CalledInOrder):
-        return _Classification.unsafe()
-
-    if isinstance(formula, InstanceBefore):
-        return _Classification.unsafe()
-
-    if isinstance(formula, WithinSteps):
-        return _Classification.safe()
-
-    # ── Special / convenience ────────────────────────────────────────────
-    if isinstance(formula, Predicate):
-        rs = getattr(formula, "runtime_safe", None)
+    f = formula
+    if isinstance(f, Called) or isinstance(f, CalledWith):
+        return frozenset({PFALSE, TRUE}), None
+    if isinstance(f, Now):
+        return frozenset({FALSE, PENDING, TRUE}), None
+    if isinstance(f, CalledWithResult):
+        return frozenset({PFALSE, PENDING, TRUE}), None
+    if isinstance(f, CalledNTimes):
+        if f.op in ("<=", "<"):
+            return frozenset({PTRUE, FALSE} if f.n > 0 or f.op == "<=" else {FALSE}), None
+        if f.op in (">=", ">"):
+            return frozenset({TRUE} if (f.op == ">=" and f.n <= 0) else {PFALSE, TRUE}), None
+        return frozenset({PTRUE, FALSE} if f.n <= 0 else {PFALSE, PTRUE, FALSE}), None
+    if isinstance(f, (Before, AllBefore, InstanceBefore, WithinSteps)):
+        return frozenset({FALSE, PENDING, TRUE}), None
+    if isinstance(f, After):
+        return frozenset({FALSE, PFALSE, TRUE}), None
+    if isinstance(f, BranchCalled):
+        return frozenset({FALSE, PENDING, PTRUE} if f.wrong_tool else {PENDING, TRUE}), None
+    if isinstance(f, CalledInOrder):
+        return frozenset({PENDING, TRUE}), None
+    if isinstance(f, Predicate):
+        rs = getattr(f, "runtime_safe", None)
         if rs is True:
-            return _Classification.safe()
+            return frozenset({FALSE, PTRUE, TRUE}), None
         if rs is False:
-            return _Classification.unsafe()
-        return _Classification.ambiguous_predicate()
+            return frozenset({PFALSE, PTRUE}), None
+        return _ALL, _Classification.ambiguous_predicate()
+    if isinstance(f, AtPosition):
+        if f.index < 0:
+            return frozenset({FALSE}), None
+        inner, amb = reachable_values(f.operand)
+        return inner | {PENDING}, amb
+    if isinstance(f, Not):
+        inner, amb = reachable_values(f.operand)
+        return frozenset(TRUE - v for v in inner), amb
+    if isinstance(f, (And, Or, Implies, Until, WeakUntil, Release)):
+        left, amb_l = reachable_values(f.left)
+        right, amb_r = reachable_values(f.right)
+        amb = _ambiguous_combine(amb_l, amb_r) if amb_l and amb_r else (amb_l or amb_r)
+        if isinstance(f, And):
+            return _pairs(min, left, right), amb
+        if isinstance(f, Or):
+            return _pairs(max, left, right), amb
+        if isinstance(f, Implies):
+            return _pairs(max, frozenset(TRUE - v for v in left), right), amb
+        if isinstance(f, Release):
+            left, right = frozenset(TRUE - v for v in left), frozenset(TRUE - v for v in right)
+        # until: max(min(ψ_i, φ_0..φ_i-1) ..., min(φ_0..φ_n-1, PENDING))
+        hits = _pairs(min, right, left | {TRUE}) | {FALSE}
+        tails = frozenset(min(v, PENDING) for v in left) | {PENDING}
+        values = _pairs(max, hits, tails)
+        if isinstance(f, Release):
+            values = frozenset(TRUE - v for v in values)
+        return values, amb
+    if isinstance(f, Globally):
+        inner, amb = reachable_values(f.operand)
+        return frozenset(min(v, PENDING) for v in inner) | {PENDING}, amb
+    if isinstance(f, Eventually):
+        inner, amb = reachable_values(f.operand)
+        return frozenset(max(v, PENDING) for v in inner) | {PENDING}, amb
+    if isinstance(f, Next):
+        inner, amb = reachable_values(f.operand)
+        return inner | {PENDING}, amb
+    if isinstance(f, ForAll):
+        inner, amb = reachable_values(f.body)
+        return frozenset(min(v, PENDING) for v in inner) | {PENDING}, amb
+    if isinstance(f, Exists):
+        inner, amb = reachable_values(f.body)
+        return frozenset(max(v, PFALSE) for v in inner) | {PFALSE}, amb
+    return _ALL, _Classification.ambiguous_unknown(type(f).__name__)
 
-    if isinstance(formula, AtPosition):
-        # Bounded position — safety inherits from the operand.
-        return classify_runtime_safety(formula.operand)
 
-    # ── Boolean connectives ──────────────────────────────────────────────
-    if isinstance(formula, Not):
-        inner = classify_runtime_safety(formula.operand)
-        if inner.safety == RuntimeSafety.SAFE:
-            return _Classification.unsafe()
-        if inner.safety == RuntimeSafety.UNSAFE:
-            return _Classification.safe()
-        return inner  # AMBIGUOUS preserved with its source
+def classify_runtime_safety(formula: Formula) -> _Classification:
+    """Classify *formula* by what refusing a call for it would mean.
 
-    if isinstance(formula, And):
-        left = classify_runtime_safety(formula.left)
-        right = classify_runtime_safety(formula.right)
-        # SAFE if either operand is SAFE — the violation of the safe side
-        # is detectable, and a conjunction fails when any conjunct fails.
-        if left.safety == RuntimeSafety.SAFE or right.safety == RuntimeSafety.SAFE:
-            return _Classification.safe()
-        if left.safety == RuntimeSafety.UNSAFE and right.safety == RuntimeSafety.UNSAFE:
-            return _Classification.unsafe()
-        # One UNSAFE + one AMBIGUOUS, or both AMBIGUOUS.
-        if left.safety == RuntimeSafety.AMBIGUOUS and right.safety == RuntimeSafety.AMBIGUOUS:
-            return _ambiguous_combine(left, right)
-        return left if left.safety == RuntimeSafety.AMBIGUOUS else right
+    * SAFE: it can only fail finally (``FALSE``): a refusal always points at a real
+      violation, made by the call refused.
+    * UNSAFE: it can fail *presumptively* (``PFALSE``, an obligation not met yet), so a
+      blocking severity refuses calls until the obligation is met.
+    * INERT: it never fails before the run ends (``F``, ``in_order``): a blocking
+      severity never fires. Check it at termination instead.
+    * AMBIGUOUS: a predicate that declared nothing, or an unknown node.
 
-    if isinstance(formula, Or):
-        left = classify_runtime_safety(formula.left)
-        right = classify_runtime_safety(formula.right)
-        # SAFE only if both operands are SAFE — a disjunction is violated
-        # only when both disjuncts are.
-        if left.safety == RuntimeSafety.SAFE and right.safety == RuntimeSafety.SAFE:
-            return _Classification.safe()
-        if left.safety == RuntimeSafety.UNSAFE or right.safety == RuntimeSafety.UNSAFE:
-            return _Classification.unsafe()
-        if left.safety == RuntimeSafety.AMBIGUOUS and right.safety == RuntimeSafety.AMBIGUOUS:
-            return _ambiguous_combine(left, right)
-        return left if left.safety == RuntimeSafety.AMBIGUOUS else right
-
-    if isinstance(formula, Implies):
-        # p → q  ≡  ¬p ∨ q
-        left = classify_runtime_safety(Not(formula.left))
-        right = classify_runtime_safety(formula.right)
-        if left.safety == RuntimeSafety.SAFE and right.safety == RuntimeSafety.SAFE:
-            return _Classification.safe()
-        if left.safety == RuntimeSafety.UNSAFE or right.safety == RuntimeSafety.UNSAFE:
-            return _Classification.unsafe()
-        if left.safety == RuntimeSafety.AMBIGUOUS and right.safety == RuntimeSafety.AMBIGUOUS:
-            return _ambiguous_combine(left, right)
-        return left if left.safety == RuntimeSafety.AMBIGUOUS else right
-
-    # ── Temporal operators ───────────────────────────────────────────────
-    if isinstance(formula, Globally):
-        # G is the canonical safety operator: once φ fails at any position
-        # the violation is permanent.  We classify G(φ) as SAFE
-        # unconditionally — note that this is an over-approximation for
-        # the rare nested-liveness case G(F(...)), which is technically
-        # unbounded liveness but shows up vanishingly often in agent
-        # constraints.
+    Returns an internal :class:`_Classification`; callers that only need the public
+    label read ``.safety``.
+    """
+    values, ambiguous = reachable_values(formula)
+    if ambiguous is not None:
+        return ambiguous
+    if PFALSE in values:
+        return _Classification.unsafe()
+    if FALSE in values:
         return _Classification.safe()
-
-    if isinstance(formula, Eventually):
-        # Canonical unbounded liveness.  The witness can always appear later.
-        return _Classification.unsafe()
-
-    if isinstance(formula, Next):
-        # Bounded one step ahead; safety inherits from the operand.
-        return classify_runtime_safety(formula.operand)
-
-    if isinstance(formula, Until):
-        # φ U ψ requires ψ to eventually hold; ψ might come arbitrarily late.
-        return _Classification.unsafe()
-
-    if isinstance(formula, WeakUntil):
-        # φ W ψ ≡ G φ ∨ (φ U ψ).  Refutable iff φ fails before ψ; SAFE iff
-        # φ is SAFE.
-        return classify_runtime_safety(formula.left)
-
-    if isinstance(formula, Release):
-        # φ R ψ requires ψ to hold up to (and including) the release point;
-        # SAFE iff ψ is SAFE — a violation of ψ before φ appears is permanent.
-        return classify_runtime_safety(formula.right)
-
-    # ── Quantifiers ──────────────────────────────────────────────────────
-    if isinstance(formula, ForAll):
-        # ∀x. body — fails as soon as any binding makes body fail; SAFE iff
-        # body is SAFE under any concrete binding (the substituted body is
-        # an instance of the same node type so the recursive answer is
-        # the right one).
-        return classify_runtime_safety(formula.body)
-
-    if isinstance(formula, Exists):
-        # ∃x. body — a witness may appear later at any position for any
-        # binding.  Even a SAFE body becomes liveness here.
-        return _Classification.unsafe()
-
-    # ── Unknown ──────────────────────────────────────────────────────────
-    return _Classification.ambiguous_unknown(type(formula).__name__)
+    return _Classification(RuntimeSafety.INERT)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -347,12 +299,13 @@ def _is_compatible(
 
     * SAFE — always compatible.
     * UNSAFE — only compatible with TOLERATE.
+    * INERT — never fires mid-run, so a blocking severity is a mistake: TOLERATE only.
     * AMBIGUOUS, source=TRUSTED_PREDICATE — always compatible.
     * AMBIGUOUS, source=UNKNOWN_NODE — only compatible with TOLERATE.
     """
     if classification.safety == RuntimeSafety.SAFE:
         return True
-    if classification.safety == RuntimeSafety.UNSAFE:
+    if classification.safety in (RuntimeSafety.UNSAFE, RuntimeSafety.INERT):
         return severity not in _BLOCKING_SEVERITIES
     # AMBIGUOUS
     if classification.source == _AmbiguousSource.TRUSTED_PREDICATE:
@@ -366,6 +319,13 @@ def _is_compatible(
 
 
 def _suggestion(formula: Formula, classification: _Classification) -> str:
+    if classification.safety == RuntimeSafety.INERT:
+        return (
+            "It cannot fail before the run ends, so a blocking severity never fires. "
+            "Check it when the agent finishes (applies_to_final_answer=True with "
+            "max_termination_nudges), or rewrite it as a bounded property using "
+            "WithinSteps(tool_a, tool_b, n)."
+        )
     if classification.safety == RuntimeSafety.UNSAFE:
         if isinstance(formula, Eventually):
             return (
