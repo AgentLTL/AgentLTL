@@ -11,10 +11,14 @@ Supported grammar (case-insensitive keywords)::
                | 'G' unary         -- Globally
                | 'F' unary         -- Eventually
                | 'X' unary         -- Next
+               | 'Y' unary         -- Previous (past)
+               | 'O' unary         -- Once (past)
+               | 'H' unary         -- Historically (past)
                | binary
     binary   ::= atom ('U' unary)?  -- Until
                | atom ('W' unary)?  -- WeakUntil
                | atom ('R' unary)?  -- Release
+               | atom ('S' unary)?  -- Since (past)
     atom     ::= 'true' | 'false'
                | function_call
                | '(' formula ')'
@@ -51,12 +55,16 @@ from ._ast import (
     Eventually,
     Formula,
     Globally,
+    Historically,
     Implies,
     Next,
     Not,
     Now,
+    Once,
     Or,
+    Previous,
     Release,
+    Since,
     Until,
     WeakUntil,
 )
@@ -211,8 +219,18 @@ class _Parser:
             if upper == "X":
                 self._advance()
                 return Next(self._parse_unary())
+            if upper in ("Y", "O", "H") and self._peek_next_is_operand():
+                self._advance()
+                cls = {"Y": Previous, "O": Once, "H": Historically}[upper]
+                return cls(self._parse_unary())
 
         return self._parse_binary()
+
+    def _peek_next_is_operand(self) -> bool:
+        """``O(...)``, ``H now(...)``: the letter is an operator, not a function name."""
+        nxt = self.tokens[self.pos + 1] if self.pos + 1 < len(self.tokens) else None
+        return nxt is not None and nxt.type in (_TokenType.LPAREN, _TokenType.IDENT,
+                                                _TokenType.BANG)
 
     def _parse_binary(self) -> Formula:
         left = self._parse_atom()
@@ -231,6 +249,10 @@ class _Parser:
                 self._advance()
                 right = self._parse_unary()
                 return Release(left, right)
+            if upper == "S":
+                self._advance()
+                right = self._parse_unary()
+                return Since(left, right)
         return left
 
     def _parse_atom(self) -> Formula:

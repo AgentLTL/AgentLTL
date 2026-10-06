@@ -44,7 +44,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from ._evaluator import LTLEvaluator
-from ._partial import caused_elsewhere
+from ._ast import Globally
+from ._partial import caused_elsewhere, is_past_only, uncertain
 from ._trace import Trace
 from .enforcement import (
     SEVERITY_STRENGTH,
@@ -530,16 +531,28 @@ class Enforcer:
         self._constraint_checks += len(self._constraints)
         out: List[Violation] = []
         for constraint in self._constraints:
-            result = _EVALUATOR.evaluate(constraint.formula, trace, metrics=metrics,
-                                         partial_trace=True)
-            if result.passed:
-                continue
-            # Refuse a call only for what IT newly breaks: when every failing instance was
-            # already final before this call, the call isn't the cause and refusing it
-            # would repair nothing (see agentltl._partial.caused_elsewhere).
-            if completed and caused_elsewhere(result, self._prefix_value(constraint)):
-                self._already_violated += 1
-                continue
+            formula = constraint.formula
+            if isinstance(formula, Globally) and is_past_only(formula.operand):
+                # Past-only under G: each earlier instance was settled when its call was
+                # made, so only the new one can be this call's doing. Judged there alone.
+                pos = len(trace) - 1
+                inner = _EVALUATOR.evaluate(formula.operand, trace, pos, metrics=metrics,
+                                            partial_trace=True)
+                if inner.passed:
+                    continue
+                result = inner
+                result.detail = f"G violated at position {pos}: {inner.detail}"
+                result.witnesses = [(("G", pos) + p, v) for p, v in inner.witnesses]
+            else:
+                result = _EVALUATOR.evaluate(formula, trace, metrics=metrics, partial_trace=True)
+                if result.passed:
+                    continue
+                # Refuse a call only for what IT newly breaks: when every failing instance
+                # was already final before this call, the call isn't the cause and refusing
+                # it would repair nothing (see agentltl._partial.caused_elsewhere).
+                if completed and caused_elsewhere(result, self._prefix_value(constraint)):
+                    self._already_violated += 1
+                    continue
             out.append(Violation(
                 constraint_name=constraint.name,
                 severity=self.severity(constraint.name).value,
@@ -548,6 +561,7 @@ class Enforcer:
                 description=str(getattr(constraint, "description", "") or ""),
                 repair=str(getattr(constraint, "repair", "") or ""),
                 witnesses=list(result.witnesses),
+                uncertain=uncertain(result.witnesses),
             ))
         return out
 

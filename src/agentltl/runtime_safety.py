@@ -61,19 +61,25 @@ from ._ast import (
     CalledNTimes,
     CalledWith,
     CalledWithResult,
+    CountBefore,
     Eventually,
     Exists,
     ForAll,
     Formula,
     Globally,
+    Historically,
     Implies,
     InstanceBefore,
+    Matches,
     Next,
     Not,
     Now,
+    Once,
     Or,
     Predicate,
+    Previous,
     Release,
+    Since,
     Until,
     WeakUntil,
     WithinSteps,
@@ -180,8 +186,21 @@ def reachable_values(formula: Formula) -> Tuple[FrozenSet[int], Optional[_Classi
     f = formula
     if isinstance(f, Called) or isinstance(f, CalledWith):
         return frozenset({PFALSE, TRUE}), None
-    if isinstance(f, Now):
+    if isinstance(f, (Now, Matches)):
         return frozenset({FALSE, PENDING, TRUE}), None
+    if isinstance(f, CountBefore):
+        return frozenset({FALSE, PENDING, TRUE}), None
+    if isinstance(f, Previous):
+        inner, amb = reachable_values(f.operand)
+        return inner | {FALSE, PENDING}, amb
+    if isinstance(f, (Once, Historically)):
+        inner, amb = reachable_values(f.operand)
+        return inner | {PENDING} | ({FALSE} if isinstance(f, Once) else frozenset()), amb
+    if isinstance(f, Since):
+        left, amb_l = reachable_values(f.left)
+        right, amb_r = reachable_values(f.right)
+        amb = _ambiguous_combine(amb_l, amb_r) if amb_l and amb_r else (amb_l or amb_r)
+        return _pairs(min, right, left | {TRUE}) | {FALSE, PENDING}, amb
     if isinstance(f, CalledWithResult):
         return frozenset({PFALSE, PENDING, TRUE}), None
     if isinstance(f, CalledNTimes):

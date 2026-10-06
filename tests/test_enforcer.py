@@ -190,3 +190,27 @@ class TestTermination:
     def test_nothing_pending_lets_it_finish(self):
         assert isinstance(enforcer(NEVER_RM).check_termination(), Decision)
         assert enforcer(NEVER_RM, max_termination_nudges=3).check_termination().allowed
+
+
+class TestPastTimeRules:
+    def test_before_since_is_judged_per_call(self):
+        from agentltl import Previous, Since, Implies
+        # every push needs a test run since the last edit
+        rule = Constraint("tests-before-push", Globally(Implies(
+            Now("push"), Previous(Since(Not(Now("edit")), Now("test"))))))
+        enf = enforcer(rule, default_severity=S.BLOCK_AND_WARN)
+        assert run(enf, "push", "test", "push", "edit", "push", "push", "ls", "push") == [
+            "warn", "allow", "allow", "allow", "warn", "allow", "allow", "warn"]
+
+    def test_a_possible_match_is_flagged_uncertain(self):
+        from agentltl import Matches, ToolPattern
+
+        class Rm(ToolPattern):
+            def match(self, name, args):
+                return None if args.get("unknown") else name in self.tools
+
+        rule = Constraint("no-rm", Globally(Not(Matches(Rm("rm"), maybe=True))))
+        enf = enforcer(rule, default_severity=S.PERSISTENT_BLOCK)
+        assert not enf.check("rm", {}).violation.uncertain
+        d = enf.check("rm", {"unknown": True})
+        assert d.action == "block" and d.violation.uncertain

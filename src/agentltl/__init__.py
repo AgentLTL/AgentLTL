@@ -74,6 +74,16 @@ from ._ast import (
     And,
     Or,
     Implies,
+    # Past-time operators
+    Previous,
+    Once,
+    Historically,
+    Since,
+    CountBefore,
+    # Call patterns
+    Matches,
+    CallPattern,
+    ToolPattern,
     # Special
     Predicate,
     AtPosition,
@@ -146,6 +156,8 @@ __all__ = [
     "Before", "After", "AllBefore", "BranchCalled",
     "InstanceBefore", "CalledInOrder", "WithinSteps",
     "Globally", "Eventually", "Next", "Until", "WeakUntil", "Release",
+    "Previous", "Once", "Historically", "Since", "CountBefore",
+    "Matches", "CallPattern", "ToolPattern",
     "Not", "And", "Or", "Implies",
     "Predicate", "AtPosition",
     # FOLTL extensions

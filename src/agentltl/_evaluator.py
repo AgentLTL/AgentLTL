@@ -49,7 +49,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from ._partial import PartialEvaluator, call_predicate
+from ._partial import PartialEvaluator, call_domain, call_predicate
 from ._ast import (
     AllBefore,
     After,
@@ -62,19 +62,25 @@ from ._ast import (
     CalledWith,
     CalledWithResult,
     CalledInOrder,
+    CountBefore,
     Eventually,
     Exists,
     ForAll,
     Formula,
     Globally,
+    Historically,
     Implies,
     InstanceBefore,
+    Matches,
     Next,
     Not,
     Now,
+    Once,
     Or,
     Predicate,
+    Previous,
     Release,
+    Since,
     Until,
     WeakUntil,
     WithinSteps,
@@ -196,6 +202,12 @@ class LTLEvaluator:
 
         if isinstance(formula, Predicate):
             return self._eval_predicate(formula, trace, position, metrics)
+
+        if isinstance(formula, Matches):
+            return self._eval_matches(formula, trace, position)
+
+        if isinstance(formula, (Previous, Once, Historically, Since, CountBefore)):
+            return self._eval_past(formula, trace, position, metrics)
 
         if isinstance(formula, AtPosition):
             return self._eval_at_position(formula, trace, metrics)
@@ -516,6 +528,42 @@ class LTLEvaluator:
             return EvalResult(passed, detail, f)
         return EvalResult(bool(result), f'Predicate "{f.description}" returned {result}.', f)
 
+    def _eval_matches(self, f: Matches, trace: Trace, pos: int) -> EvalResult:
+        call = trace.at(pos)
+        if call is None:
+            return EvalResult(False, f"No call at position {pos}.", f)
+        hit = f.pattern.match(call.name, call.args)
+        if hit is None:
+            return EvalResult(bool(f.maybe), f"Call #{pos + 1} ({call.name}) may match {f}.", f)
+        return EvalResult(bool(hit), f"Call #{pos + 1} ({call.name}) "
+                                     f"{'matches' if hit else 'does not match'} {f}.", f)
+
+    def _eval_past(self, f: Formula, trace: Trace, pos: int,
+                   metrics: Optional[Dict[str, Any]]) -> EvalResult:
+        def holds(g: Formula, j: int) -> bool:
+            return self.evaluate(g, trace, j, metrics=metrics).passed
+
+        last = min(pos, len(trace) - 1)
+        if isinstance(f, Previous):
+            ok = 0 < pos <= len(trace) and holds(f.operand, pos - 1)
+        elif isinstance(f, Once):
+            ok = any(holds(f.operand, j) for j in range(last + 1))
+        elif isinstance(f, Historically):
+            ok = all(holds(f.operand, j) for j in range(last + 1))
+        elif isinstance(f, Since):
+            ok = False
+            for j in range(last, -1, -1):
+                if holds(f.right, j):
+                    ok = True
+                    break
+                if not holds(f.left, j):
+                    break
+        else:
+            n = sum(1 for j in range(min(pos, len(trace))) if holds(f.operand, j))
+            ok = {"==": n == f.n, ">=": n >= f.n, "<=": n <= f.n, ">": n > f.n,
+                  "<": n < f.n}.get(f.op, False)
+        return EvalResult(ok, f"{f} {'holds' if ok else 'fails'} at position {pos}.", f)
+
     def _eval_at_position(self, f: AtPosition, trace: Trace, metrics: Optional[Dict[str, Any]] = None) -> EvalResult:
         if f.index >= len(trace) or f.index < 0:
             return EvalResult(False, f"Position {f.index} is out of range (trace length {len(trace)}).", f)
@@ -638,7 +686,7 @@ class LTLEvaluator:
 
     def _eval_forall(self, f: ForAll, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]]) -> EvalResult:
         try:
-            entities = f.domain(trace, metrics or {})
+            entities = call_domain(f.domain, trace, metrics, pos)
         except Exception as exc:
             return EvalResult(False, f"∀{f.var}: domain extractor raised {type(exc).__name__}: {exc}", f)
 
@@ -654,7 +702,7 @@ class LTLEvaluator:
 
     def _eval_exists(self, f: Exists, trace: Trace, pos: int, metrics: Optional[Dict[str, Any]]) -> EvalResult:
         try:
-            entities = f.domain(trace, metrics or {})
+            entities = call_domain(f.domain, trace, metrics, pos)
         except Exception as exc:
             return EvalResult(False, f"∃{f.var}: domain extractor raised {type(exc).__name__}: {exc}", f)
 

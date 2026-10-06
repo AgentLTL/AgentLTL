@@ -435,6 +435,133 @@ class AtPosition(Formula):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Past-time operators
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# They look back from the current position, so on a growing trace their value at a
+# position is settled as soon as that position exists. A rule of the shape
+# G(<past-only formula>) -- "every call that ... must have ... before it" -- is therefore
+# judged on the newest call alone (see agentltl._partial.is_past_only).
+
+@dataclass(frozen=True)
+class Previous(Formula):
+    """Y φ  –  φ held at the previous position (false at the first one)."""
+    operand: Formula
+
+    def __str__(self) -> str:
+        return f"Y({self.operand})"
+
+
+@dataclass(frozen=True)
+class Once(Formula):
+    """O φ  –  φ held at some position up to and including this one."""
+    operand: Formula
+
+    def __str__(self) -> str:
+        return f"O({self.operand})"
+
+
+@dataclass(frozen=True)
+class Historically(Formula):
+    """H φ  –  φ held at every position up to and including this one."""
+    operand: Formula
+
+    def __str__(self) -> str:
+        return f"H({self.operand})"
+
+
+@dataclass(frozen=True)
+class Since(Formula):
+    """φ S ψ  –  ψ held at some position j up to this one, and φ at every position after j."""
+    left: Formula
+    right: Formula
+
+    def __str__(self) -> str:
+        return f"({self.left} S {self.right})"
+
+
+@dataclass(frozen=True)
+class CountBefore(Formula):
+    """The number of positions before this one where *operand* held satisfies ``op n``."""
+    operand: Formula
+    n: int
+    op: str = "<"  # ==, >=, <=, >, <
+
+    def __str__(self) -> str:
+        return f"count_before({self.operand}, {self.op} {self.n})"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Call patterns
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CallPattern:
+    """What :class:`Matches` asks about a call. Harnesses supply their own (globs, paths,
+    files that exist); :class:`ToolPattern` is the plain one.
+
+    ``match(name, args)`` returns True, False, or None for "maybe": the call's arguments
+    are only known when it runs (``xargs rm``). ``bind(bindings)`` returns the pattern
+    with quantifier variables (:class:`Var` values) replaced. ``tools`` names the tools it
+    can match, for linting.
+    """
+
+    tools: Tuple[str, ...] = ()
+
+    def match(self, name: str, args: Dict[str, Any]) -> Optional[bool]:
+        raise NotImplementedError
+
+    def bind(self, bindings: Dict[str, Any]) -> "CallPattern":
+        return self
+
+    def describe(self) -> str:
+        return " or ".join(self.tools) or "a call"
+
+
+class ToolPattern(CallPattern):
+    """A call to one of *tools* whose arguments include *args* (equal values; a
+    :class:`Var` value is bound by an enclosing quantifier)."""
+
+    def __init__(self, tools: Union[str, Sequence[str]], args: Optional[Dict[str, Any]] = None):
+        self.tools = (tools,) if isinstance(tools, str) else tuple(tools)
+        self.args = dict(args or {})
+
+    def match(self, name: str, args: Dict[str, Any]) -> Optional[bool]:
+        return name in self.tools and all(args.get(k) == v for k, v in self.args.items())
+
+    def bind(self, bindings: Dict[str, Any]) -> "ToolPattern":
+        return ToolPattern(self.tools, {k: bindings.get(v.name, v) if isinstance(v, Var) else v
+                                        for k, v in self.args.items()})
+
+    def describe(self) -> str:
+        args = ", ".join(f"{k}={v!r}" for k, v in self.args.items())
+        return " or ".join(self.tools) + (f" ({args})" if args else "")
+
+    def __repr__(self) -> str:
+        return f"ToolPattern({self.tools!r}, {self.args!r})"
+
+
+@dataclass(frozen=True)
+class Matches(Formula):
+    """The call at the current position matches *pattern*.
+
+    *maybe* says how a call that only may match (the pattern answered None) counts: True
+    where counting it as a match is the cautious reading (a prohibited call), False where
+    not counting it is (a call that would satisfy an obligation). Either way the failure
+    it causes is marked as resting on a possible match.
+    """
+    pattern: Any
+    maybe: bool = False
+
+    def __hash__(self) -> int:
+        return id(self.pattern) ^ hash(self.maybe)
+
+    def __str__(self) -> str:
+        describe = getattr(self.pattern, "describe", None)
+        text = describe() if describe else repr(self.pattern)
+        return f"matches({text})"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Convenience constructors (thin wrappers for common patterns)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -592,6 +719,19 @@ def substitute(formula: Formula, bindings: Dict[str, Any]) -> Formula:
             expected_result=new_result,
             expected_args=new_args,
         )
+
+    if isinstance(formula, Matches):
+        bind = getattr(formula.pattern, "bind", None)
+        return Matches(bind(bindings), formula.maybe) if bind else formula
+
+    if isinstance(formula, (Previous, Once, Historically)):
+        return type(formula)(substitute(formula.operand, bindings))
+
+    if isinstance(formula, Since):
+        return Since(substitute(formula.left, bindings), substitute(formula.right, bindings))
+
+    if isinstance(formula, CountBefore):
+        return CountBefore(substitute(formula.operand, bindings), formula.n, formula.op)
 
     if isinstance(formula, (Called, Now, CalledNTimes, Before, After, AllBefore, BranchCalled,
                              InstanceBefore, CalledInOrder, WithinSteps)):

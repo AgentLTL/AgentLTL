@@ -330,6 +330,34 @@ The compliance score is `1 − (2.0 + 2.0 + 1.0) / (2.0 + 2.0 + 1.0) = 0.00` bec
 | `And(φ, ψ)` | φ ∧ ψ | `And(Called("a"), Called("b"))` |
 | `Or(φ, ψ)` | φ ∨ ψ | `Or(Called("a"), Called("b"))` |
 
+### Past-time operators and call patterns
+
+Runtime rules are usually about what came *before* the call being made: "a push needs a
+test run since the last edit". Past-time operators say that directly:
+
+| Formula | Parser | Meaning |
+|---|---|---|
+| `Previous(φ)` | `Y φ` | φ held at the previous position (false at the first) |
+| `Once(φ)` | `O φ` | φ held at some position up to this one |
+| `Historically(φ)` | `H φ` | φ held at every position up to this one |
+| `Since(φ, ψ)` | `φ S ψ` | ψ held at some position, and φ at every one after it |
+| `CountBefore(φ, n, op)` | | the positions before this one where φ held, compared with `op n` |
+| `Matches(pattern, maybe=)` | | the call here matches a `CallPattern` (`ToolPattern(tools, args)`, or your own) |
+
+```python
+# every push needs a test run since the last edit
+parse('G(now("push") -> Y((!now("edit")) S now("test")))')
+```
+
+Their value at a position is settled as soon as that position exists. So a rule
+`G(<past-only formula>)` can only fail at the newest call, and the enforcer judges it there
+alone: an earlier violation (an override) never blocks later calls, and the check costs
+one pass over the trace. As with `U`, `!` binds looser than `S`: write `(!a) S b`.
+
+A `CallPattern` may answer `None`, "maybe" (the call's files are only known when it runs);
+`Matches(maybe=True)` counts that as a match, `maybe=False` as none, and a refusal that
+rests on it is marked `Violation.uncertain`.
+
 ### ForAll example
 
 ```python

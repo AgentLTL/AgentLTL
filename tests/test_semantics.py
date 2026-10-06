@@ -14,6 +14,9 @@ Property tests check that the three agree by construction:
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from agentltl._ast import (
+    CountBefore, Historically, Matches, Once, Previous, Since, ToolPattern,
+)
 from agentltl import (
     After, AllBefore, And, AtPosition, Before, BranchCalled, Called, CalledInOrder,
     CalledNTimes, CalledWith, Constraint, ConstraintSeverity, ConstraintViolationError,
@@ -22,7 +25,7 @@ from agentltl import (
 )
 from agentltl._enforcement_engine import ConstraintEnforcer
 from agentltl._evaluator import LTLEvaluator
-from agentltl._partial import FALSE, PENDING, PFALSE, TRUE
+from agentltl._partial import FALSE, PENDING, PFALSE, TRUE, caused_elsewhere, is_past_only
 from agentltl.runtime_safety import classify_runtime_safety, reachable_values
 
 EV = LTLEvaluator()
@@ -69,11 +72,41 @@ def _extend(children):
 
 
 formulas = st.recursive(atoms, _extend, max_leaves=5)
+
+
+class MaybePattern(ToolPattern):
+    """Matches a tool; arguments x=1 make it a possible match only (as with xargs)."""
+
+    def match(self, name, args):
+        if name not in self.tools:
+            return False
+        return None if args.get("x") == 1 else True
+
+
+past_atoms = st.one_of(
+    tool.map(Now),
+    st.builds(lambda t, maybe: Matches(MaybePattern(t), maybe), tool, st.booleans()),
+)
+
+
+def _extend_past(children):
+    return st.one_of(
+        children.map(Not), children.map(Previous), children.map(Once),
+        children.map(Historically), st.builds(Since, children, children),
+        st.builds(CountBefore, children, st.integers(0, 2), st.sampled_from(["<", ">=", "=="])),
+        st.builds(And, children, children), st.builds(Or, children, children),
+        st.builds(Implies, children, children),
+    )
+
+
+past_formulas = st.recursive(past_atoms, _extend_past, max_leaves=5)
+mixed = st.one_of(formulas, past_formulas, st.builds(Globally, past_formulas),
+                  st.builds(And, formulas, past_formulas))
 SETTINGS = settings(max_examples=600, deadline=None)
 
 
 @SETTINGS
-@given(formulas, calls, calls)
+@given(mixed, calls, calls)
 def test_h1_final_verdicts_are_final(f, prefix, more):
     v = value(f, prefix).value
     if v in (FALSE, TRUE):
@@ -82,7 +115,7 @@ def test_h1_final_verdicts_are_final(f, prefix, more):
 
 
 @SETTINGS
-@given(formulas, calls)
+@given(mixed, calls)
 def test_h2_values_are_reachable(f, prefix):
     reach, ambiguous = reachable_values(f)
     assert ambiguous is None
@@ -90,7 +123,7 @@ def test_h2_values_are_reachable(f, prefix):
 
 
 @SETTINGS
-@given(formulas, calls)
+@given(mixed, calls)
 def test_h3_safe_formulas_only_fail_finally(f, prefix):
     if classify_runtime_safety(f).safety == RuntimeSafety.SAFE:
         assert value(f, prefix).value != PFALSE
@@ -120,13 +153,37 @@ def test_h4_before_is_its_expansion(a, b, prefix):
 
 
 @SETTINGS
-@given(formulas, calls, st.integers(1, 3))
+@given(mixed, calls, st.integers(1, 3))
 def test_h5_false_witnesses_stay_false(f, prefix, n):
     # Calls to a tool the formula doesn't name keep every final failure as it was, so
     # an unrelated call is never blamed for one.
     before = {p for p, v in value(f, prefix).witnesses if v == FALSE}
     after = {p for p, v in value(f, prefix + [("z", 0)] * n).witnesses if v == FALSE}
     assert before <= after
+
+
+@SETTINGS
+@given(past_formulas, calls, st.tuples(tool, st.sampled_from([0, 1])))
+def test_h6_past_only_rules_are_judged_at_the_new_call_alone(phi, prefix, call):
+    """The enforcer's shortcut for G(past-only) refuses exactly what the full evaluation
+    with marginal causation would."""
+    assert is_past_only(phi)
+    rule = Globally(phi)
+    full = value(rule, prefix + [call])
+    before = value(rule, prefix) if prefix else None
+    refused_by_full = not full.passed and not (prefix and caused_elsewhere(full, before))
+    refused_by_shortcut = not EV.evaluate(phi, trace_of(prefix + [call]), len(prefix),
+                                          partial_trace=True).passed
+    assert refused_by_full == refused_by_shortcut
+
+
+@SETTINGS
+@given(past_formulas, calls)
+def test_h7_past_operators_agree_with_strict_mode_where_they_are_settled(phi, prefix):
+    for pos in range(len(prefix)):
+        v = EV.evaluate(phi, trace_of(prefix), pos, partial_trace=True).value
+        if v in (FALSE, TRUE):
+            assert EV.evaluate(phi, trace_of(prefix), pos).passed == (v == TRUE)
 
 
 # ── Regressions ──────────────────────────────────────────────────────────────

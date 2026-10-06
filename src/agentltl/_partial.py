@@ -37,9 +37,9 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from ._ast import (
     After, AllBefore, And, AtPosition, Before, BranchCalled, Called, CalledInOrder,
-    CalledNTimes, CalledWith, CalledWithResult, Eventually, Exists, ForAll, Formula, Globally,
-    Implies, InstanceBefore, Next, Not, Now, Or, Predicate, Release, Until, WeakUntil,
-    WithinSteps, substitute,
+    CalledNTimes, CalledWith, CalledWithResult, CountBefore, Eventually, Exists, ForAll,
+    Formula, Globally, Historically, Implies, InstanceBefore, Matches, Next, Not, Now, Once, Or,
+    Predicate, Previous, Release, Since, Until, WeakUntil, WithinSteps, substitute,
 )
 from ._trace import Trace
 
@@ -85,7 +85,48 @@ def _known_result(call) -> bool:
     return "result" in raw or "tool_result" in raw
 
 
-_LOCAL = (Now, Next, Globally, Eventually, Until, WeakUntil, Release, AtPosition, Predicate)
+_LOCAL = (Now, Next, Globally, Eventually, Until, WeakUntil, Release, AtPosition, Predicate,
+          Matches, Previous, Once, Historically, Since, CountBefore)
+_PAST = (Previous, Once, Historically, Since, CountBefore)
+
+
+def is_past_only(f: Formula) -> bool:
+    """Is the formula's value at a position settled by the calls up to that position?
+
+    True for ``now``/``matches`` atoms and past-time operators over them, with boolean
+    connectives and quantifiers (whose domain is read at the position). Such a formula
+    under ``G`` can only fail at the newest call, so an enforcer judges it there alone.
+    """
+    if isinstance(f, (Now, Matches)):
+        return True
+    if isinstance(f, (Not, Previous, Once, Historically)):
+        return is_past_only(f.operand)
+    if isinstance(f, CountBefore):
+        return is_past_only(f.operand)
+    if isinstance(f, (And, Or, Implies, Since)):
+        return is_past_only(f.left) and is_past_only(f.right)
+    if isinstance(f, (ForAll, Exists)):
+        return is_past_only(f.body)
+    return False
+
+
+def call_domain(fn: Callable, trace: Trace, metrics: Optional[Dict], position: int) -> Any:
+    """A quantifier's domain: ``(trace, metrics)``, or ``(trace, metrics, position)`` for a
+    domain read at the position being judged (the values of the call there)."""
+    arity = getattr(fn, "__agentltl_arity__", None)
+    if arity is None:
+        try:
+            params = inspect.signature(fn).parameters.values()
+            positional = [p for p in params
+                          if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+            arity = 3 if any(p.kind == p.VAR_POSITIONAL for p in params) or len(positional) >= 3 else 2
+        except (TypeError, ValueError):
+            arity = 2
+        try:
+            fn.__agentltl_arity__ = arity
+        except (AttributeError, TypeError):
+            pass
+    return fn(trace, metrics or {}, position) if arity == 3 else fn(trace, metrics or {})
 
 
 def is_local(f: Formula) -> bool:
@@ -131,12 +172,32 @@ def call_predicate(fn: Callable, trace: Trace, position: int, metrics: Optional[
 class PartialEvaluator:
     """Evaluates a formula on a growing trace, in the five-valued semantics above."""
 
+    def __init__(self) -> None:
+        self._depth = 0
+        self._memo: Dict[Tuple[int, int], Value] = {}
+
     def value(self, f: Formula, trace: Trace, pos: int = 0,
               metrics: Optional[Dict[str, Any]] = None) -> Value:
         method = getattr(self, "_" + type(f).__name__, None)
         if method is None:
             raise TypeError(f"Unknown formula type: {type(f).__name__}")
-        return method(f, trace, pos, metrics)
+        if self._depth == 0:
+            self._memo = {}
+        self._depth += 1
+        try:
+            if isinstance(f, _PAST):
+                # past-time operators look back over positions their callers revisit:
+                # remembered for the rest of this evaluation, so each costs O(n) once
+                key = (id(f), pos)
+                hit = self._memo.get(key)
+                if hit is None:
+                    hit = self._memo[key] = method(f, trace, pos, metrics)
+                return hit
+            return method(f, trace, pos, metrics)
+        finally:
+            self._depth -= 1
+            if self._depth == 0:
+                self._memo = {}
 
     # ── Atoms ────────────────────────────────────────────────────────────────
 
@@ -299,6 +360,91 @@ class PartialEvaluator:
             return Value(value, detail)
         return Value(PTRUE if result else PFALSE, f'Predicate "{f.description}" returned {result}.')
 
+    def _Matches(self, f: Matches, t: Trace, pos, m) -> Value:
+        call = t.at(pos)
+        if call is None:
+            return Value(PENDING, f"No call at position {pos} yet.")
+        try:
+            hit = f.pattern.match(call.name, call.args)
+        except Exception as exc:
+            return Value(PFALSE, f"Pattern {f} raised {type(exc).__name__}: {exc}")
+        describe = getattr(f.pattern, "describe", lambda: str(f.pattern))
+        if hit is None:
+            # only a possible match: counted the cautious way, and marked as such
+            v = TRUE if f.maybe else FALSE
+            return Value(v, lambda: f'Call #{pos + 1} ({call.name}) may match {describe()}.',
+                         ("maybe", pos))
+        return Value(TRUE if hit else FALSE,
+                     lambda: f'Call #{pos + 1} ({call.name}) {"matches" if hit else "does not match"} '
+                             f'{describe()}.')
+
+    # ── Past-time operators ──────────────────────────────────────────────────
+
+    def _Previous(self, f: Previous, t: Trace, pos, m) -> Value:
+        if pos >= len(t) + 1:
+            return Value(PENDING, f"Position {pos} has not been reached yet.")
+        if pos == 0:
+            return Value(FALSE, "No previous call.")
+        inner = self.value(f.operand, t, pos - 1, m)
+        return Value(inner.value, lambda: f"Y at position {pos - 1}: {inner.detail}", inner.key,
+                     [(("Y",) + p, w) for p, w in inner.witnesses])
+
+    def _past(self, f, t: Trace, pos, m) -> List[Value]:
+        return [self.value(f.operand, t, j, m) for j in range(0, min(pos, len(t) - 1) + 1)]
+
+    def _Once(self, f: Once, t: Trace, pos, m) -> Value:
+        if pos >= len(t):
+            return Value(PENDING, f"Position {pos} has not been reached yet.")
+        values = self._past(f, t, pos, m)
+        best = max(range(len(values)), key=lambda j: values[j].value, default=None)
+        if best is not None and values[best].value >= PENDING:
+            v = values[best]
+            return Value(v.value, lambda: f"O satisfied at position {best}: {v.detail}", v.key)
+        value = max([v.value for v in values] + [FALSE])
+        maybe = any(_maybe(v.key) for v in values)
+        return Value(value, lambda: f"O: {f.operand} has not held up to position {pos}.",
+                     ("maybe", pos) if maybe else None)
+
+    def _Historically(self, f: Historically, t: Trace, pos, m) -> Value:
+        if pos >= len(t):
+            return Value(PENDING, f"Position {pos} has not been reached yet.")
+        values = self._past(f, t, pos, m)
+        worst = min(range(len(values)), key=lambda j: values[j].value)
+        v = values[worst]
+        if v.value >= PENDING:
+            return Value(v.value, f"H holds up to position {pos}.")
+        return Value(v.value, lambda: f"H violated at position {worst}: {v.detail}", v.key,
+                     [(("H", worst) + p, w) for p, w in v.witnesses])
+
+    def _Since(self, f: Since, t: Trace, pos, m) -> Value:
+        if pos >= len(t):
+            return Value(PENDING, f"Position {pos} has not been reached yet.")
+        # max over j of min(ψ_j, φ_{j+1..pos}), scanning back from pos
+        best, suffix, maybe = FALSE, TRUE, False
+        for j in range(pos, -1, -1):
+            right = self.value(f.right, t, j, m)
+            best = max(best, min(right.value, suffix))
+            left = self.value(f.left, t, j, m)
+            maybe = maybe or _maybe(left.key) or _maybe(right.key)
+            suffix = min(suffix, left.value)
+            if suffix < PENDING and best >= PENDING:
+                break
+        value = best
+        return Value(value, lambda: (f"S holds at position {pos}." if value >= PENDING else
+                                     f"S violated at position {pos}: {f.right} has not held "
+                                     f"since the last time {f.left} failed."),
+                     ("maybe", pos) if maybe else None)
+
+    def _CountBefore(self, f: CountBefore, t: Trace, pos, m) -> Value:
+        if pos >= len(t):
+            return Value(PENDING, f"Position {pos} has not been reached yet.")
+        values = [self.value(f.operand, t, j, m) for j in range(pos)]
+        n = sum(1 for v in values if v.value > PENDING)
+        ok = _cmp(n, f.op, f.n)
+        return Value(TRUE if ok else FALSE,
+                     f"{f.operand} held {n} time(s) before position {pos}; expected {f.op} {f.n}.",
+                     ("#", n))
+
     def _AtPosition(self, f: AtPosition, t: Trace, pos, m) -> Value:
         if f.index < 0:
             return Value(FALSE, f"Position {f.index} is out of range.")
@@ -416,14 +562,14 @@ class PartialEvaluator:
 
     # ── Quantifiers ──────────────────────────────────────────────────────────
 
-    def _entities(self, f, t: Trace, m):
+    def _entities(self, f, t: Trace, m, pos: int = 0):
         try:
-            return f.domain(t, m or {}), None
+            return call_domain(f.domain, t, m, pos), None
         except Exception as exc:
             return None, f"domain extractor raised {type(exc).__name__}: {exc}"
 
     def _ForAll(self, f: ForAll, t: Trace, pos, m) -> Value:
-        entities, error = self._entities(f, t, m)
+        entities, error = self._entities(f, t, m, pos)
         if error:
             return Value(PFALSE, f"∀{f.var}: {error}")
         if not entities:
@@ -438,7 +584,7 @@ class PartialEvaluator:
         return Value(value, lambda: f"∀{f.var}: failed for {f.var}={e!r}. {v.detail}", None, witnesses)
 
     def _Exists(self, f: Exists, t: Trace, pos, m) -> Value:
-        entities, error = self._entities(f, t, m)
+        entities, error = self._entities(f, t, m, pos)
         if error:
             return Value(PFALSE, f"∃{f.var}: {error}")
         if not entities:
@@ -463,6 +609,18 @@ def _deciding(value: int, *sides: Tuple[int, Any]) -> Tuple[Any, ...]:
     if value == TRUE:
         return ("⊤",)
     return tuple(key if v == value else None for v, key in sides)
+
+
+def _maybe(key: Any) -> bool:
+    """Does a witness key rest on a possible match (see Matches)?"""
+    if isinstance(key, tuple):
+        return bool(key) and (key[0] == "maybe" or any(_maybe(k) for k in key))
+    return False
+
+
+def uncertain(witnesses: List[Witness]) -> bool:
+    """Does any failing witness rest on a possible match rather than a certain one?"""
+    return any(_maybe(path) for path, value in witnesses if value < PENDING)
 
 
 def _hashable(x: Any) -> Any:
