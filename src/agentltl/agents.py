@@ -414,8 +414,9 @@ class MultiTurnAgent:
         nudge_max: int = 1,
         strict_runtime_safety: bool = False,
         backend: str = "native",
-        reviewer_config: Optional[Any] = None,
-        reviewer_client: Optional[Any] = None,
+        enforcer_kwargs: Optional[Dict[str, Any]] = None,
+        agent_cls: Optional[Any] = None,
+        agent_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
         if backend != "native":
             raise ValueError(
@@ -447,22 +448,15 @@ class MultiTurnAgent:
             soft_block_mode=soft_block_mode,
             max_consecutive_soft_attempts=max_consecutive_soft_attempts,
             nudge_max=nudge_max,
+            enforcer_kwargs=enforcer_kwargs,
             _skip_runtime_safety_check=True,
         )
-        # Inference-time reviewer ("Reinforced Agent"): when a reviewer_config is
-        # supplied, use the reviewer-wrapped native agent. Constraints and the
-        # reviewer compose (both no-op cleanly when unset), but the benchmark runs
-        # them as separate arms.
-        if reviewer_config is not None:
-            from agentltl.integrations.native.reviewed_agent import ReviewedNativeAgent
-            self._impl = ReviewedNativeAgent(
-                reviewer_config=reviewer_config,
-                reviewer_client=reviewer_client,
-                **impl_kwargs,
-            )
-        else:
+        # agent_cls replaces the native agent with a subclass of it (one that adds a
+        # reviewer, say), constructed with agent_kwargs on top of the usual arguments.
+        if agent_cls is None:
             from agentltl.integrations.native.backend import NativeOpenAIAgent
-            self._impl = NativeOpenAIAgent(**impl_kwargs)
+            agent_cls = NativeOpenAIAgent
+        self._impl = agent_cls(**impl_kwargs, **(agent_kwargs or {}))
         self.reset()
 
     def reset(self) -> None:
@@ -502,7 +496,13 @@ class MultiTurnAgent:
     def get_constraint_status(self) -> Dict[str, Any]:
         return self._impl.get_constraint_status()
 
+    @property
+    def agent(self) -> Any:
+        """The underlying agent (an ``agent_cls`` instance)."""
+        return self._impl
+
     def get_reviewer_status(self) -> Dict[str, Any]:
+        # kept for agent classes that add a reviewer; see ``agent_cls``
         fn = getattr(self._impl, "get_reviewer_status", None)
         return fn() if fn else {"mode": "reviewed", "enabled": False}
 

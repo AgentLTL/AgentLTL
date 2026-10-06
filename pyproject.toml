@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentltl"
-version = "0.1.0"
+version = "0.2.0"
 description = "FOLTL constraint verification for LLM agent traces"
 readme = "README.md"
 license = { text = "MIT" }
@@ -40,12 +40,14 @@ native = [
 ]
 dev = [
     "pytest>=7.0",
+    "hypothesis>=6.0",
     "ruff>=0.4",
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-org/agentltl"
-Issues = "https://github.com/your-org/agentltl/issues"
+Homepage = "https://agentltl.github.io"
+Source = "https://github.com/AgentLTL/AgentLTL"
+Issues = "https://github.com/AgentLTL/AgentLTL/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

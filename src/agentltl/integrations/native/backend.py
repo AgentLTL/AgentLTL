@@ -94,26 +94,16 @@ class NativeOpenAIAgent:
         base_url: Optional[str] = None,
         bill_to: Optional[str] = None,
         max_steps: int = 10,
-        # A BLOCKED TURN IS NOT A STEP THE AGENT SPENT. `max_steps` bounds model
-        # turns, so an intercepted call used to consume the same budget as an
-        # executed one -- which handicaps every enforced arm against its own
-        # baseline by exactly the number of times we interrupt it. Measured on mab
-        # run 9: `persistent_block` exhausted the budget on 16 of 150 episodes at
-        # 14.1 blocks and 0.9 EXECUTED calls each, and every one of those was then
-        # scored as a task failure. The comparison being measured is whether
-        # enforcement improves correctness, so charging the enforced arm for turns
-        # the baseline never pays confounds precisely that.
+        # A blocked turn is not a step the agent spent. `max_steps` bounds model
+        # turns, so without this an intercepted call consumes the same budget as an
+        # executed one, and an enforced run is handicapped by exactly the number of
+        # times it was interrupted.
         #
-        # When set, a turn in which NOTHING executed draws on this allowance
-        # instead of on `max_steps`. It is bounded rather than free because
-        # `persistent_block` has no escape hatch: an agent repeating a call we
-        # keep refusing would otherwise loop forever. Exhausting it ends the
-        # episode and is reported (`blocked_steps_exhausted`) rather than being
-        # absorbed into "no final answer".
-        #
-        # `None` keeps the historical behaviour exactly, so no existing arm changes
-        # unless its runner opts in. This alters what an episode can do, so it is a
-        # BETWEEN-RUNS change: switch it on with a new run index.
+        # When set, a turn in which nothing executed draws on this allowance instead
+        # of on `max_steps`. It is bounded rather than free because a block with no
+        # escape hatch would otherwise let an agent repeat a refused call forever.
+        # Exhausting it ends the episode and is reported (`blocked_steps_exhausted`).
+        # `None` keeps the original behaviour.
         max_blocked_steps: Optional[int] = None,
         model_seed: Optional[int] = None,
         model_instance: Optional[Any] = None,
@@ -136,6 +126,8 @@ class NativeOpenAIAgent:
         # liveness obligation unmet. 0 is off and is the default, so an existing
         # caller is byte-identical. See ConstraintEnforcer.check_termination.
         max_termination_nudges: int = 0,
+        # Further Enforcer settings (rank=, render=, escalate_to=, latch_stop=, ...).
+        enforcer_kwargs: Optional[Dict[str, Any]] = None,
         mcp_servers: Optional[Dict[str, Any]] = None,
         _skip_runtime_safety_check: bool = False,
         **_ignored: Any,
@@ -164,13 +156,15 @@ class NativeOpenAIAgent:
         self._system_prompt = system_prompt if system_prompt is not None else DEFAULT_SYSTEM_PROMPT
 
         # Resolve model id + OpenAI client.
-        self._base_url = base_url or os.getenv("OPENAI_BASE_URL") or HF_ROUTER_BASE_URL
+        # None: the OpenAI client's own default. For the HuggingFace router pass
+        # base_url=HF_ROUTER_BASE_URL; the provider then goes in a `model:provider` suffix.
+        self._base_url = base_url or os.getenv("OPENAI_BASE_URL") or None
         resolved_provider = provider or os.getenv("HF_INFERENCE_PROVIDER")
         model_name = model or os.getenv("MODEL")
         if not model_name:
             raise ValueError("NativeOpenAIAgent requires a model name (arg `model` or $MODEL).")
         # HF router convention: encode provider as a `model:provider` suffix.
-        if resolved_provider and ":" not in model_name and "router.huggingface.co" in self._base_url:
+        if resolved_provider and ":" not in model_name and "router.huggingface.co" in (self._base_url or ""):
             model_name = f"{model_name}:{resolved_provider}"
         self._model = model_name
 
@@ -190,7 +184,7 @@ class NativeOpenAIAgent:
             # to the personal account behind HF_TOKEN.
             default_headers: Dict[str, str] = {}
             resolved_bill_to = bill_to or os.getenv("HF_BILL_TO")
-            if resolved_bill_to and "huggingface.co" in self._base_url:
+            if resolved_bill_to and "huggingface.co" in (self._base_url or ""):
                 default_headers["X-HF-Bill-To"] = resolved_bill_to
             self._client = OpenAI(
                 base_url=self._base_url,
@@ -207,6 +201,7 @@ class NativeOpenAIAgent:
             max_consecutive_soft_attempts=max_consecutive_soft_attempts,
             nudge_max=nudge_max,
             max_termination_nudges=max_termination_nudges,
+            **(enforcer_kwargs or {}),
         )
         self.reset()
 
@@ -288,13 +283,10 @@ class NativeOpenAIAgent:
                 })
 
                 if not tool_calls:
-                    # THE AGENT IS TRYING TO FINISH, so the prefix is final and a
-                    # liveness obligation becomes decidable here for the first time.
-                    # `Called(x)` cannot block mid-episode -- the call might still be
-                    # coming -- which is why 52% of WorkBench's and 35% of bfcl's
-                    # wrong episodes fail ONLY constraints no mode could ever reach.
-                    # Bounded inside the enforcer, and inert unless constraints were
-                    # opted in with `applies_to_final_answer`.
+                    # The agent is trying to finish, so the trace is final and an
+                    # obligation such as `Called(x)` becomes decidable here for the
+                    # first time. Bounded inside the enforcer, and inert unless
+                    # constraints were opted in with `applies_to_final_answer`.
                     # getattr, not a direct call: the enforcer is a collaborator
                     # and a caller may supply one that predates this gate.
                     _ct = getattr(self._enforcer, "check_termination", None)
@@ -452,9 +444,8 @@ class NativeOpenAIAgent:
         An OpenAI function name cannot contain a dot, so an adapter that sanitises
         `analytics.create_plot` to `analytics_create_plot` will still be handed the
         dotted spelling by the model. Refusing it measures the sanitisation rather
-        than the agent: 4755 calls across 125 WorkBench instances were rejected this
-        way in one run, and a constraint naming the sanitised tool cannot match a
-        call spelled the other way, so compliance silently measures the wrong thing.
+        than the agent, and a constraint naming the sanitised tool cannot match a
+        call spelled the other way.
 
         Two tools that normalise to the same key leave the lookup a MISS. Executing
         the wrong tool is worse than declining.
