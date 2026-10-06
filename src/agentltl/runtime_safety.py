@@ -281,6 +281,7 @@ def classify_runtime_safety(formula: Formula) -> _Classification:
 
 _BLOCKING_SEVERITIES = (
     ConstraintSeverity.HARD_STOP,
+    ConstraintSeverity.ASK,
     ConstraintSeverity.SOFT_BLOCK,
     # PERSISTENT_BLOCK permanently blocks the call with no override, so — unlike
     # the overridable BLOCK_AND_WARN — it must not be paired with a constraint

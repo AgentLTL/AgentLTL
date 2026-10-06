@@ -36,8 +36,8 @@ Core types
 * :class:`Formula` (and subclasses) – LTL + FOLTL AST nodes
 * :class:`Var` – variable placeholder bound by quantifiers
 * :class:`ForAll` / :class:`Exists` – first-order quantifiers
-* :func:`substitute` – AST rewriter replacing Var with concrete values
 * :class:`Constraint` – named, weighted formula
+* :class:`Enforcer` / :class:`Decision` – judge each proposed call at run time
 * :class:`Trace` – ordered sequence of tool calls
 * :class:`LTLEvaluator` – formula interpreter (with quantifier support)
 * :func:`verify_trace` – evaluate constraints and compute compliance score
@@ -110,16 +110,22 @@ from ._parser import parse
 # ── Enforcement types (framework-agnostic) ────────────────────────────────────
 from .enforcement import (
     ConstraintSeverity,
+    SEVERITY_STRENGTH,
     SoftBlockMode,
     ConstraintViolation,
     ConstraintViolationError,
 )
+
+# ── Runtime enforcement ───────────────────────────────────────────────────────
+from .enforcer import Enforcer, Decision, Violation
 
 # ── Static runtime-safety classification ─────────────────────────────────────
 from .runtime_safety import (
     RuntimeSafety,
     ClassificationReport,
     classify_constraints,
+    classify_runtime_safety,
+    reachable_values,
 )
 
 # ── Backend-agnostic agent wrappers ───────────────────────────────────────────
@@ -142,24 +148,27 @@ __all__ = [
     "Globally", "Eventually", "Next", "Until", "WeakUntil", "Release",
     "Not", "And", "Or", "Implies",
     "Predicate", "AtPosition",
-    "called", "before", "after", "eventually", "always",
     # FOLTL extensions
-    "Var", "ForAll", "Exists", "substitute",
+    "Var", "ForAll", "Exists",
     # Trace
     "Trace", "ToolCall",
     # Evaluator
     "LTLEvaluator", "EvalResult",
     # Constraints
-    "Constraint", "ConstraintResult", "ComplianceResult", "verify_trace",
+    "Constraint", "verify_trace",
     # Parser
     "parse",
-    # Enforcement types
-    "ConstraintSeverity", "SoftBlockMode",
+    # Runtime enforcement
+    "Enforcer", "Decision", "Violation",
+    "ConstraintSeverity", "SEVERITY_STRENGTH", "SoftBlockMode",
     "ConstraintViolation", "ConstraintViolationError",
     # Runtime-safety classification
     "RuntimeSafety", "ClassificationReport", "classify_constraints",
+    "classify_runtime_safety", "reachable_values",
     # Agent wrappers
     "Agent", "AgentWithAdditionalTools",
     "AgentWithSubAgents", "AgentWithConstraints",
     "MultiTurnAgent",
 ]
+# Also importable, but not part of the documented API: called, before, after, eventually,
+# always (lowercase constructors), substitute, ConstraintResult, ComplianceResult.

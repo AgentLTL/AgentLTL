@@ -409,6 +409,52 @@ goes through, and the next deploy is refused again.
 
 ## Runtime Enforcement
 
+### Enforcer (any agent loop)
+
+`Enforcer` is what every integration and harness drives. It judges each proposed call
+and returns a `Decision`; it never raises:
+
+```python
+from agentltl import Constraint, ConstraintSeverity as S, Enforcer, parse
+
+enforcer = Enforcer(
+    [Constraint("one-deploy", parse('G(now("deploy") -> X(G(!now("deploy"))))'),
+                repair="Deploy once per session.")],
+    {"one-deploy": S.BLOCK_AND_WARN},
+)
+
+decision = enforcer.check("deploy", {"env": "prod"}, generation=completion_id)
+if decision.allowed:
+    result = run_tool(...)
+    enforcer.record_completed("deploy", {"env": "prod"}, result=result, status=0)
+else:
+    reply_to_model(decision.feedback)   # decision.action: warn | retry | ask | block | stop
+```
+
+| Severity | `Decision.action` | |
+|---|---|---|
+| `HARD_STOP` | `stop` | `latch_stop=True` refuses every later call until `resume()` |
+| `PERSISTENT_BLOCK` | `block` | refused every time |
+| `ASK` | `ask` | a human decides; the model can't override |
+| `SOFT_BLOCK` | `retry` | escalates after `max_soft_attempts` to `escalate_to` (`HARD_STOP` or `ASK`) |
+| `BLOCK_AND_WARN` | `warn` | the model may insist with the identical call in a later generation |
+| `TOLERATE` | `allow` | the violation is in `decision.notes` |
+
+- **The strongest severity broken decides**, whatever order the constraints are in;
+  `nudge_max` lets one refusal report several violations of that severity (ordered by
+  `rank=`).
+- `decision.violations` are structured (`constraint_name`, `detail`, `repair`,
+  `witnesses`); `render=` replaces the default feedback text.
+- `check_chain([(tool, args), ...])` judges calls that run together (a shell command
+  line) all or nothing; `decision.index` names the refused one.
+- `to_state()` / `from_state()` carry the run (trace, counters, override pointer) as JSON
+  between processes.
+- `check_termination()` sends the model back, a bounded number of times
+  (`max_termination_nudges`), while a constraint marked `applies_to_final_answer` is unmet.
+
+`ConstraintEnforcer` is the same engine with the original interface (`"allow"` or
+`(kind, feedback)`, raising `ConstraintViolationError` on a stop).
+
 ### AgentWithConstraints (backend-agnostic)
 
 The top-level `AgentWithConstraints` supports both smolagents and LangChain backends

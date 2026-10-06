@@ -8,8 +8,8 @@ installing any optional extras.
 
 Types
 -----
-* :class:`ConstraintSeverity` – HARD_STOP / SOFT_BLOCK / BLOCK_AND_WARN /
-  PERSISTENT_BLOCK / TOLERATE
+* :class:`ConstraintSeverity` – HARD_STOP / PERSISTENT_BLOCK / ASK / SOFT_BLOCK /
+  BLOCK_AND_WARN / TOLERATE
 * :class:`SoftBlockMode`      – cumulative / consecutive / hybrid
 * :class:`ConstraintViolation` – record of a single runtime violation
 * :class:`ConstraintViolationError` – exception raised when a constraint
@@ -19,8 +19,8 @@ Types
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass
-from typing import Any, Optional
+from dataclasses import dataclass, field
+from typing import Any, List, Optional
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -54,8 +54,24 @@ class ConstraintSeverity(enum.Enum):
     overridden. Re-issuing the same call is blocked again every time. Use this for a
     non-fatal but non-negotiable guardrail: the model must choose a compliant action."""
 
+    ASK = "ASK"
+    """Block the call and hand the decision to a human: the harness asks the user to
+    approve it. The model cannot override it. Without a human in the loop, a harness
+    treats it like PERSISTENT_BLOCK."""
+
     TOLERATE = "TOLERATE"
     """Log the violation and continue execution."""
+
+
+# Strongest first: when one call breaks several constraints, the strongest decides.
+SEVERITY_STRENGTH = (
+    ConstraintSeverity.HARD_STOP,
+    ConstraintSeverity.PERSISTENT_BLOCK,
+    ConstraintSeverity.ASK,
+    ConstraintSeverity.SOFT_BLOCK,
+    ConstraintSeverity.BLOCK_AND_WARN,
+    ConstraintSeverity.TOLERATE,
+)
 
 
 class SoftBlockMode(enum.Enum):
@@ -103,6 +119,10 @@ class ConstraintViolation:
     # then dropped before the agent saw anything.
     description: str = ""
     repair: str = ""
+    # The failing instances (see agentltl._partial) and whether the failure rests on a
+    # match that is only possible, such as a file name known when the call runs.
+    witnesses: List[Any] = field(default_factory=list)
+    uncertain: bool = False
 
     def advice(self) -> str:
         """The most actionable sentence available, or '' if there is none."""
@@ -193,6 +213,7 @@ class ConstraintViolationError(Exception):
 
 __all__ = [
     "ConstraintSeverity",
+    "SEVERITY_STRENGTH",
     "SoftBlockMode",
     "ConstraintViolation",
     "ConstraintViolationError",
