@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentltl"
-version = "0.2.0"
+version = "0.2.1"
 description = "FOLTL constraint verification for LLM agent traces"
 readme = "README.md"
 license = { text = "MIT" }
