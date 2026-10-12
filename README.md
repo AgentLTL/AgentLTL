@@ -32,6 +32,14 @@ C = 1 − Σ(violated weights) / Σ(all weights)
 
 ## Installation
 
+Paste this into your coding agent (Claude Code, Codex, Copilot CLI, Mistral Vibe...):
+
+```
+Install the AgentLTL Python package (pip install agentltl, in a virtual environment) and add rules to this agent project by following https://agentltl.github.io/concepts/
+```
+
+Or install manually:
+
 ```bash
 # Core FOLTL engine (zero dependencies)
 pip install agentltl
