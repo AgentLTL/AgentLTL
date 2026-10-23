@@ -1,0 +1,20 @@
+# AgentLTL rulebook: Prescriptions.
+# Tool names are placeholders: copy this file and rename them to your agent's tools.
+
+name: healthcare
+description: 'Prescriptions.'
+
+rules:
+  - name: allergies_before_prescription
+    formula: 'G(now("prescribe") -> O(now("check_allergies")))'
+    severity: HARD_STOP
+    weight: 3
+    description: 'Allergies are checked before any prescription.'
+    repair: 'Call check_allergies for this patient.'
+
+  - name: interactions_before_prescription
+    formula: 'before("check_interactions", "prescribe")'
+    severity: HARD_STOP
+    weight: 3
+    description: 'Drug interactions are checked before prescribing.'
+    repair: 'Call check_interactions with the current medication.'

@@ -1,0 +1,27 @@
+# AgentLTL rulebook: Purchasing and anti-corruption.
+# Tool names are placeholders: copy this file and rename them to your agent's tools.
+
+name: procurement
+description: 'Purchasing and anti-corruption.'
+
+rules:
+  - name: conflict_check_before_award
+    formula: 'G(now("award_contract") -> O(now("check_conflict_of_interest")))'
+    severity: HARD_STOP
+    weight: 3
+    description: 'No contract is awarded before a conflict-of-interest check.'
+    repair: 'Call check_conflict_of_interest for the bidders.'
+
+  - name: three_quotes_before_award
+    formula: 'G(now("award_contract") -> count_before(now("request_quote"), >= 3))'
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'A contract is awarded after at least 3 quotes.'
+    repair: 'Request more quotes before awarding.'
+
+  - name: register_gift
+    formula: 'G(now("accept_gift") -> X(now("register_gift")))'
+    severity: SOFT_BLOCK
+    weight: 2
+    description: 'An accepted gift is registered right away.'
+    repair: 'Call register_gift now.'

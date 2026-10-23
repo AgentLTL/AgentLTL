@@ -49,6 +49,9 @@ pip install "agentltl[smolagents]"
 
 # With the native OpenAI-compatible agent loop
 pip install "agentltl[native]"
+
+# With YAML rulebooks
+pip install "agentltl[yaml]"
 ```
 
 0.2 removed the LangChain integration: drive an `Enforcer` from your LangChain loop
@@ -723,6 +726,55 @@ Constraints with `applies_to_final_answer=True` are skipped by the
 registration-time hook (they run only at the end of the agent's run and
 cannot cause spurious mid-run terminations) but still appear in
 `classify_constraints` reports for inspection.
+
+---
+
+## Rulebooks
+
+A rulebook is a YAML file of rules. Each rule has a formula (the syntax of `parse`), a
+severity, a weight, a description, and a `repair` text for the agent:
+
+```yaml
+name: mine
+description: 'My rules.'
+rules:
+  - name: tests_before_deploy
+    formula: 'before("run_tests", "deploy_prod")'   # single quotes: YAML can't start a plain string with ! or |
+    severity: HARD_STOP                              # optional, default HARD_STOP
+    weight: 3                                        # optional, default 1
+    description: 'The test suite runs before any production deployment.'
+    repair: 'Run run_tests first, then deploy.'
+    applies_to_final_answer: false                   # optional
+```
+
+`rulebooks.load` takes paths and the names of the bundled rulebooks, and merges them
+(it needs PyYAML: `pip install "agentltl[yaml]"`):
+
+```python
+from agentltl import rulebooks, verify_trace
+
+book = rulebooks.load("devops", "payments", "my_rules.yaml")
+enforcer = book.enforcer(max_termination_nudges=1)   # Enforcer(book.constraints, book.severities)
+result = verify_trace(metrics, book.constraints)
+```
+
+The bundled rulebooks live in [`src/agentltl/rulebooks/`](src/agentltl/rulebooks/)
+(`rulebooks.available()` lists them). Their tool names are placeholders: copy a file and
+rename the tools to your agent's. Their blocking rules are written over the past
+(runtime-SAFE); end-of-run obligations are `TOLERATE` with `applies_to_final_answer`.
+
+| Rulebook | Rules |
+|----------|-------|
+| `devops` | tests before deploy, approval before prod, no force-push, backup before `drop_table`, one prod deploy, health check after deploy |
+| `privacy` | consent before processing, anonymize before export, no transfer outside the EU, log every record access |
+| `payments` | KYC + sanctions before payment, two approvals, no duplicate payment, quote right before order |
+| `support` | customer and order looked up before refund, notify within 3 steps of escalation, nothing after close |
+| `research` | search before answering, cite sources, web-search budget |
+| `budget` | bounded retries and polling, read before write, no email bursts |
+| `data_pipeline` | validate before load, fan-in before report, fetch → validate → transform → load |
+| `healthcare` | allergies and interactions checked before prescribing |
+| `procurement` | conflict-of-interest check and 3 quotes before award, gifts registered |
+| `human_in_the_loop` | user confirms each email and account deletion |
 
 ---
 

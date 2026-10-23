@@ -1,0 +1,34 @@
+# AgentLTL rulebook: Customer support and refunds.
+# Tool names are placeholders: copy this file and rename them to your agent's tools.
+
+name: support
+description: 'Customer support and refunds.'
+
+rules:
+  - name: customer_before_refund
+    formula: 'before("lookup_customer", "issue_refund")'
+    severity: SOFT_BLOCK
+    weight: 2
+    description: 'The customer is identified before a refund.'
+    repair: 'Call lookup_customer first.'
+
+  - name: order_before_refund
+    formula: 'G(now("issue_refund") -> O(now("get_order")))'
+    severity: PERSISTENT_BLOCK
+    weight: 3
+    description: 'Every refund refers to an order that was looked up.'
+    repair: 'Call get_order for the order being refunded.'
+
+  - name: notify_after_escalation
+    formula: 'within_steps("escalate_ticket", "notify_customer", 3)'
+    severity: BLOCK_AND_WARN
+    weight: 1
+    description: 'The customer hears about an escalation within 3 steps.'
+    repair: 'Call notify_customer about the escalation now.'
+
+  - name: nothing_after_close
+    formula: 'G(!Y(O(now("close_ticket"))))'
+    severity: PERSISTENT_BLOCK
+    weight: 1
+    description: 'Once the ticket is closed, no further action runs.'
+    repair: 'The ticket is closed; give your final answer.'

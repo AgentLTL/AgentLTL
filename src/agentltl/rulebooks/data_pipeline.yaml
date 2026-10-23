@@ -1,0 +1,28 @@
+# AgentLTL rulebook: Extract, validate, transform, load.
+# Tool names are placeholders: copy this file and rename them to your agent's tools.
+
+name: data_pipeline
+description: 'Extract, validate, transform, load.'
+
+rules:
+  - name: validate_before_load
+    formula: 'G(now("load") -> O(now("validate_data")))'
+    severity: HARD_STOP
+    weight: 3
+    description: 'Nothing is loaded before the data is validated.'
+    repair: 'Call validate_data, then load.'
+
+  - name: fan_in_before_report
+    formula: 'all_before(["fetch_users", "fetch_orders"], "build_report")'
+    severity: SOFT_BLOCK
+    weight: 2
+    description: 'The report waits for both sources.'
+    repair: 'Call fetch_users and fetch_orders before build_report.'
+
+  - name: pipeline_order
+    formula: 'in_order(["fetch_data", "validate_data", "transform", "load"])'
+    severity: TOLERATE
+    weight: 1
+    description: 'The pipeline runs fetch, validate, transform, load.'
+    repair: 'Complete the missing pipeline stages in order.'
+    applies_to_final_answer: true

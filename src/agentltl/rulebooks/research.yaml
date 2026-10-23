@@ -1,0 +1,29 @@
+# AgentLTL rulebook: Retrieval-augmented answers.
+# Tool names are placeholders: copy this file and rename them to your agent's tools.
+
+name: research
+description: 'Retrieval-augmented answers.'
+
+rules:
+  - name: search_before_answer
+    formula: 'F(called("search_docs"))'
+    severity: TOLERATE
+    weight: 2
+    description: 'The answer rests on a document search.'
+    repair: 'Call search_docs before answering.'
+    applies_to_final_answer: true
+
+  - name: cite_sources
+    formula: 'G(now("search_docs") -> F(now("cite_source")))'
+    severity: TOLERATE
+    weight: 1
+    description: 'What was searched is cited.'
+    repair: 'Call cite_source for the documents used.'
+    applies_to_final_answer: true
+
+  - name: web_search_budget
+    formula: 'called_n("web_search", <= 5)'
+    severity: BLOCK_AND_WARN
+    weight: 1
+    description: 'At most 5 web searches per run.'
+    repair: 'Answer with what you have found.'

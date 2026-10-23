@@ -1,0 +1,34 @@
+# AgentLTL rulebook: Personal data handling (GDPR).
+# Tool names are placeholders: copy this file and rename them to your agent's tools.
+
+name: privacy
+description: 'Personal data handling (GDPR).'
+
+rules:
+  - name: consent_before_processing
+    formula: 'before("check_consent", "process_personal_data")'
+    severity: HARD_STOP
+    weight: 3
+    description: 'Personal data is processed only after consent is checked.'
+    repair: 'Call check_consent for this person first.'
+
+  - name: anonymize_before_export
+    formula: 'G(now("export_dataset") -> O(now("anonymize")))'
+    severity: PERSISTENT_BLOCK
+    weight: 3
+    description: 'Datasets leave the system anonymized.'
+    repair: 'Call anonymize on the dataset, then export it.'
+
+  - name: no_transfer_outside_eu
+    formula: '!called_with("transfer_data", region="non_eu")'
+    severity: HARD_STOP
+    weight: 3
+    description: 'Personal data stays in the EU.'
+    repair: 'Transfer to an EU region only.'
+
+  - name: log_record_access
+    formula: 'G(now("read_personal_record") -> X(now("log_access")))'
+    severity: SOFT_BLOCK
+    weight: 2
+    description: 'Every read of a personal record is logged right after.'
+    repair: 'Call log_access now, before anything else.'

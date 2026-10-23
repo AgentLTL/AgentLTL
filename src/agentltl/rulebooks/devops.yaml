@@ -1,0 +1,49 @@
+# AgentLTL rulebook: Deployments and destructive operations.
+# Tool names are placeholders: copy this file and rename them to your agent's tools.
+
+name: devops
+description: 'Deployments and destructive operations.'
+
+rules:
+  - name: tests_before_deploy
+    formula: 'before("run_tests", "deploy_prod")'
+    severity: HARD_STOP
+    weight: 3
+    description: 'The test suite runs before any production deployment.'
+    repair: 'Run run_tests first, then deploy.'
+
+  - name: approval_before_prod
+    formula: 'G(now("deploy_prod") -> O(now("approve_release")))'
+    severity: ASK
+    weight: 3
+    description: 'A production deployment needs an approved release.'
+    repair: 'Call approve_release before deploy_prod.'
+
+  - name: no_force_push
+    formula: '!called_with("git_push", force=true)'
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'History on the remote is never rewritten.'
+    repair: 'Push without force; rebase or merge locally instead.'
+
+  - name: backup_before_drop
+    formula: 'G(now("drop_table") -> O(now("backup_db")))'
+    severity: HARD_STOP
+    weight: 3
+    description: 'No table is dropped without a backup.'
+    repair: 'Call backup_db before drop_table.'
+
+  - name: single_prod_deploy
+    formula: 'called_n("deploy_prod", <= 1)'
+    severity: SOFT_BLOCK
+    weight: 1
+    description: 'At most one production deployment per run.'
+    repair: 'The release is already deployed; do not deploy it again.'
+
+  - name: health_check_after_deploy
+    formula: 'G(now("deploy_prod") -> F(now("health_check")))'
+    severity: TOLERATE
+    weight: 1
+    description: 'A production deployment is followed by a health check.'
+    repair: 'Call health_check on the deployed service.'
+    applies_to_final_answer: true

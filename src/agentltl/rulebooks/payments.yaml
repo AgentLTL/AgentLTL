@@ -1,0 +1,34 @@
+# AgentLTL rulebook: Payments and trading.
+# Tool names are placeholders: copy this file and rename them to your agent's tools.
+
+name: payments
+description: 'Payments and trading.'
+
+rules:
+  - name: kyc_before_payment
+    formula: 'all_before(["verify_identity", "check_sanctions"], "execute_payment")'
+    severity: HARD_STOP
+    weight: 3
+    description: 'The payee is identified and screened before any payment.'
+    repair: 'Call verify_identity and check_sanctions before execute_payment.'
+
+  - name: four_eyes_approval
+    formula: 'G(now("execute_payment") -> count_before(now("approve_payment"), >= 2))'
+    severity: ASK
+    weight: 3
+    description: 'A payment needs two approvals.'
+    repair: 'Get a second approve_payment before executing.'
+
+  - name: single_payment
+    formula: 'called_n("execute_payment", <= 1)'
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'A payment is executed once (no duplicates).'
+    repair: 'The payment was already executed; do not repeat it.'
+
+  - name: fresh_quote_before_order
+    formula: 'G(now("place_order") -> Y(now("get_quote")))'
+    severity: SOFT_BLOCK
+    weight: 2
+    description: 'An order is placed right after a quote.'
+    repair: 'Call get_quote immediately before place_order.'

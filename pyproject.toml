@@ -33,10 +33,14 @@ smolagents = [
 native = [
     "openai>=1.0",
 ]
+yaml = [
+    "pyyaml>=6.0",
+]
 dev = [
     "pytest>=7.0",
     "hypothesis>=6.0",
     "ruff>=0.4",
+    "pyyaml>=6.0",
 ]
 
 [project.urls]
@@ -46,6 +50,9 @@ Issues = "https://github.com/AgentLTL/AgentLTL/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"agentltl.rulebooks" = ["*.yaml"]
 
 [tool.ruff]
 line-length = 100

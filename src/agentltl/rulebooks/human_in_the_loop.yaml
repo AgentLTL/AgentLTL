@@ -1,0 +1,20 @@
+# AgentLTL rulebook: Actions a person confirms first.
+# Tool names are placeholders: copy this file and rename them to your agent's tools.
+
+name: human_in_the_loop
+description: 'Actions a person confirms first.'
+
+rules:
+  - name: confirm_before_send
+    formula: 'G(now("send_email") -> Y(now("ask_user_confirmation")))'
+    severity: ASK
+    weight: 2
+    description: 'Each email is confirmed by the user just before it is sent.'
+    repair: 'Call ask_user_confirmation with the draft, then send it.'
+
+  - name: confirm_before_delete
+    formula: '(!now("delete_account")) W now("user_confirm_deletion")'
+    severity: PERSISTENT_BLOCK
+    weight: 3
+    description: 'An account is deleted only after the user confirms.'
+    repair: 'Call user_confirm_deletion first.'

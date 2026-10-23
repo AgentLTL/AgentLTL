@@ -1,0 +1,34 @@
+# AgentLTL rulebook: Loops, retries and side-effect bursts.
+# Tool names are placeholders: copy this file and rename them to your agent's tools.
+
+name: budget
+description: 'Loops, retries and side-effect bursts.'
+
+rules:
+  - name: bounded_retries
+    formula: 'called_n("retry_request", <= 3)'
+    severity: SOFT_BLOCK
+    weight: 1
+    description: 'At most 3 retries.'
+    repair: 'Stop retrying and report the failure.'
+
+  - name: bounded_polling
+    formula: 'called_n("poll_status", <= 10)'
+    severity: HARD_STOP
+    weight: 1
+    description: 'At most 10 polls.'
+    repair: 'Stop polling and report the last status.'
+
+  - name: read_before_write
+    formula: 'G(now("write_file") -> O(now("read_file")))'
+    severity: SOFT_BLOCK
+    weight: 2
+    description: 'A file is read before it is written.'
+    repair: 'Call read_file first.'
+
+  - name: no_email_burst
+    formula: 'G(now("send_email") -> !Y(now("send_email")))'
+    severity: BLOCK_AND_WARN
+    weight: 1
+    description: 'No two emails in a row.'
+    repair: 'Check the previous email went out as intended before sending another.'
