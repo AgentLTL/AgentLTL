@@ -765,16 +765,16 @@ rename the tools to your agent's. Their blocking rules are written over the past
 
 | Rulebook | Rules |
 |----------|-------|
-| `devops` | tests before deploy, approval before prod, no force-push, backup before `drop_table`, one prod deploy, health check after deploy |
-| `privacy` | consent before processing, anonymize before export, no transfer outside the EU, log every record access |
-| `payments` | KYC + sanctions before payment, two approvals, no duplicate payment, quote right before order |
-| `support` | customer and order looked up before refund, notify within 3 steps of escalation, nothing after close |
-| `research` | search before answering, cite sources, web-search budget |
-| `budget` | bounded retries and polling, read before write, no email bursts |
-| `data_pipeline` | validate before load, fan-in before report, fetch → validate → transform → load |
-| `healthcare` | allergies and interactions checked before prescribing |
-| `procurement` | conflict-of-interest check and 3 quotes before award, gifts registered |
-| `human_in_the_loop` | user confirms each email and account deletion |
+| `devops` | tests before deploy and after the last code change, staging before prod, approval before prod, no force-push, backup before `drop_table`, never drop the prod database, one prod deploy, health check after deploy |
+| `privacy` | consent before processing, anonymize before export, no PII in exports, no transfer outside the EU, processing agreement before sharing, log every record access, erasure requests carried out |
+| `payments` | KYC + sanctions before payment, invoice matched, two approvals, call-back for a new beneficiary, no duplicate payment, quote right before order |
+| `support` | history read before replying, customer and order looked up before refund, one refund per ticket, notify within 3 steps of escalation, nothing after close |
+| `research` | search before answering, internal documents before the web, cite sources, cite only what was read, web-search budget |
+| `budget` | total tool-call budget, bounded retries with back-off, bounded polling and sub-agents, read before write, no email bursts |
+| `data_pipeline` | schema checked before transform, validate before load, load once, fan-in before report, fetch → validate → transform → load |
+| `healthcare` | patient identity, allergies, interactions and dosage checked before prescribing, physician approval for controlled substances, record updated |
+| `procurement` | conflict-of-interest check, 3 quotes and budget check before award, one award, gifts registered |
+| `human_in_the_loop` | user confirms each email, post, external share and account deletion just before it |
 
 ---
 

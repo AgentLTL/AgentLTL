@@ -1,10 +1,18 @@
-# AgentLTL rulebook: Personal data handling (GDPR).
-# Tool names are placeholders: copy this file and rename them to your agent's tools.
+# AgentLTL rulebook: personal data handling (GDPR).
+#
+# For agents that read, process, export or share personal data.
+# Tool names are placeholders (check_consent, process_personal_data, anonymize,
+# export_dataset, transfer_data, read_personal_record, log_access, check_dpa,
+# share_with_third_party, erasure_request, delete_personal_data): rename them to yours.
+#
+# Rules about arguments (region, include_pii) need the tool to expose them as separate
+# arguments with exact values: called_with compares values for equality.
 
 name: privacy
 description: 'Personal data handling (GDPR).'
 
 rules:
+  # Lawful basis (art. 6): the first processing comes after the first consent check.
   - name: consent_before_processing
     formula: 'before("check_consent", "process_personal_data")'
     severity: HARD_STOP
@@ -19,6 +27,16 @@ rules:
     description: 'Datasets leave the system anonymized.'
     repair: 'Call anonymize on the dataset, then export it.'
 
+  # Data minimisation (art. 5): an export never asks for identifying fields.
+  - name: no_pii_in_export
+    formula: '!called_with("export_dataset", include_pii=true)'
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'Exports never include directly identifying fields.'
+    repair: 'Export with include_pii=false.'
+
+  # Transfers outside the EU (chapter V). Only the exact value "non_eu" is caught: list
+  # your tool's region values and add one rule per forbidden region if needed.
   - name: no_transfer_outside_eu
     formula: '!called_with("transfer_data", region="non_eu")'
     severity: HARD_STOP
@@ -26,9 +44,28 @@ rules:
     description: 'Personal data stays in the EU.'
     repair: 'Transfer to an EU region only.'
 
+  # Processor contract (art. 28): a data processing agreement is checked before sharing.
+  - name: dpa_before_third_party
+    formula: 'G(now("share_with_third_party") -> O(now("check_dpa")))'
+    severity: PERSISTENT_BLOCK
+    weight: 3
+    description: 'Data is shared with a third party only under a checked processing agreement.'
+    repair: 'Call check_dpa for this recipient before sharing.'
+
+  # X = the very next call: the access is logged right away, nothing in between.
   - name: log_record_access
     formula: 'G(now("read_personal_record") -> X(now("log_access")))'
     severity: SOFT_BLOCK
     weight: 2
     description: 'Every read of a personal record is logged right after.'
     repair: 'Call log_access now, before anything else.'
+
+  # Right to erasure (art. 17): a request received during the run is carried out
+  # before the agent finishes. About the future, so checked at the end.
+  - name: erasure_request_honoured
+    formula: 'G(now("erasure_request") -> F(now("delete_personal_data")))'
+    severity: TOLERATE
+    weight: 2
+    description: 'An erasure request is carried out before the run ends.'
+    repair: 'Call delete_personal_data for the person who asked for erasure.'
+    applies_to_final_answer: true

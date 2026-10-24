@@ -1,10 +1,19 @@
-# AgentLTL rulebook: Deployments and destructive operations.
-# Tool names are placeholders: copy this file and rename them to your agent's tools.
+# AgentLTL rulebook: deployments and destructive operations.
+#
+# For coding / ops agents that can test, deploy and touch databases.
+# Tool names are placeholders (run_tests, deploy_staging, deploy_prod, edit_code,
+# approve_release, git_push, backup_db, drop_table, drop_database, health_check):
+# copy this file and rename them to your agent's tools.
+#
+# Every blocking rule looks only at the past ("before X, Y must have happened"), so the
+# enforcer refuses a call only when it really breaks a rule. The one rule about the
+# future (health check) is TOLERATE and checked when the agent wants to finish.
 
 name: devops
 description: 'Deployments and destructive operations.'
 
 rules:
+  # The first deploy_prod must come after the first run_tests.
   - name: tests_before_deploy
     formula: 'before("run_tests", "deploy_prod")'
     severity: HARD_STOP
@@ -12,6 +21,26 @@ rules:
     description: 'The test suite runs before any production deployment.'
     repair: 'Run run_tests first, then deploy.'
 
+  # Stricter than tests_before_deploy: the tests must have run AFTER the last code
+  # change. Read: at a deploy, run_tests happened and edit_code has not happened since.
+  # SOFT_BLOCK: the agent can fix it itself by re-running the tests.
+  - name: tests_after_last_change
+    formula: 'G(now("deploy_prod") -> (!now("edit_code")) S now("run_tests"))'
+    severity: SOFT_BLOCK
+    weight: 2
+    description: 'The tests ran after the last code change before production is deployed.'
+    repair: 'The code changed since the last test run: run run_tests again, then deploy.'
+
+  # Staging is deployed (and so exercised) before production.
+  - name: staging_before_prod
+    formula: 'before("deploy_staging", "deploy_prod")'
+    severity: HARD_STOP
+    weight: 2
+    description: 'A release reaches staging before production.'
+    repair: 'Call deploy_staging first and check it, then deploy to production.'
+
+  # ASK: a human approves. Any approve_release earlier in the run counts; together with
+  # single_prod_deploy this means one approval for one deployment.
   - name: approval_before_prod
     formula: 'G(now("deploy_prod") -> O(now("approve_release")))'
     severity: ASK
@@ -19,6 +48,8 @@ rules:
     description: 'A production deployment needs an approved release.'
     repair: 'Call approve_release before deploy_prod.'
 
+  # Matches on the argument value: a call with force=true is refused. A force flag hidden
+  # in a free-text argument ("--force") is not seen; give git_push a boolean argument.
   - name: no_force_push
     formula: '!called_with("git_push", force=true)'
     severity: PERSISTENT_BLOCK
@@ -33,6 +64,14 @@ rules:
     description: 'No table is dropped without a backup.'
     repair: 'Call backup_db before drop_table.'
 
+  # Never, backup or not: the production database is out of the agent's reach.
+  - name: no_prod_db_drop
+    formula: '!called_with("drop_database", env="prod")'
+    severity: HARD_STOP
+    weight: 3
+    description: 'The production database is never dropped.'
+    repair: 'Do not drop the production database; ask an operator.'
+
   - name: single_prod_deploy
     formula: 'called_n("deploy_prod", <= 1)'
     severity: SOFT_BLOCK
@@ -40,6 +79,8 @@ rules:
     description: 'At most one production deployment per run.'
     repair: 'The release is already deployed; do not deploy it again.'
 
+  # Obligation about the future: it cannot be judged mid-run, so TOLERATE plus
+  # applies_to_final_answer (the enforcer's check_termination sends the agent back).
   - name: health_check_after_deploy
     formula: 'G(now("deploy_prod") -> F(now("health_check")))'
     severity: TOLERATE

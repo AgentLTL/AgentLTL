@@ -1,16 +1,36 @@
-# AgentLTL rulebook: Loops, retries and side-effect bursts.
-# Tool names are placeholders: copy this file and rename them to your agent's tools.
+# AgentLTL rulebook: loops, retries and side-effect bursts.
+#
+# Guards against agents that loop, hammer a service or burn their budget.
+# Tool names are placeholders (retry_request, wait, poll_status, call_subagent,
+# read_file, write_file, send_email): rename them to yours.
 
 name: budget
 description: 'Loops, retries and side-effect bursts.'
 
 rules:
+  # count_before(true, < 50) = fewer than 50 calls before this one, so the 51st call is
+  # refused. Counts every tool, whatever its name. Tune the number to your agent.
+  - name: tool_call_budget
+    formula: 'G(count_before(true, < 50))'
+    severity: HARD_STOP
+    weight: 1
+    description: 'At most 50 tool calls per run.'
+    repair: 'The call budget is spent; give your final answer with what you have.'
+
   - name: bounded_retries
     formula: 'called_n("retry_request", <= 3)'
     severity: SOFT_BLOCK
     weight: 1
     description: 'At most 3 retries.'
     repair: 'Stop retrying and report the failure.'
+
+  # Back-off: each retry comes right after a wait, never straight after a failure.
+  - name: backoff_between_retries
+    formula: 'G(now("retry_request") -> Y(now("wait")))'
+    severity: SOFT_BLOCK
+    weight: 1
+    description: 'Each retry is preceded by a wait.'
+    repair: 'Call wait before retrying.'
 
   - name: bounded_polling
     formula: 'called_n("poll_status", <= 10)'
@@ -19,6 +39,14 @@ rules:
     description: 'At most 10 polls.'
     repair: 'Stop polling and report the last status.'
 
+  # Sub-agents cost a full run each.
+  - name: bounded_subagents
+    formula: 'called_n("call_subagent", <= 5)'
+    severity: SOFT_BLOCK
+    weight: 1
+    description: 'At most 5 sub-agent calls per run.'
+    repair: 'Do the remaining work yourself or answer with what you have.'
+
   - name: read_before_write
     formula: 'G(now("write_file") -> O(now("read_file")))'
     severity: SOFT_BLOCK
@@ -26,6 +54,8 @@ rules:
     description: 'A file is read before it is written.'
     repair: 'Call read_file first.'
 
+  # No two send_email in a row. BLOCK_AND_WARN: repeating the exact same call goes
+  # through, for the rare case where it is intended.
   - name: no_email_burst
     formula: 'G(now("send_email") -> !Y(now("send_email")))'
     severity: BLOCK_AND_WARN
