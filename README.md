@@ -747,6 +747,23 @@ rules:
     applies_to_final_answer: false                   # optional
 ```
 
+A rule that refuses a call by its arguments uses `never:` in place of a formula. The
+conditions go beyond equality: values compared without case (`true` also matches `"true"`
+and `1`), lists, `not_in`, `matches` / `not_matches` (regex), `gt` / `ge` / `lt` / `le`
+(numbers) and `present`:
+
+```yaml
+  - name: eu_only
+    never: {tool: transfer_data, where: {region: {not_matches: '^(eu|europe)([-_.][a-z0-9._-]+)?$'}}}
+  - name: small_payments_only
+    never: {tool: execute_payment, where: {amount: {gt: 10000}}}
+```
+
+An argument that is missing satisfies only `not_in`, `not_matches` and `present: false`: a
+rule that allows a set of values refuses a call that does not say which one. In formulas,
+`now_with("tool", arg=value)` is the call at this step with those argument values
+(`called_with` is about the whole run).
+
 `rulebooks.load` takes paths and the names of the bundled rulebooks, and merges them
 (it needs PyYAML: `pip install "agentltl[yaml]"`):
 
@@ -760,14 +777,24 @@ result = verify_trace(metrics, book.constraints)
 
 The bundled rulebooks live in [`src/agentltl/rulebooks/`](src/agentltl/rulebooks/)
 (`rulebooks.available()` lists them). Their tool names are placeholders: copy a file and
-rename the tools to your agent's. Their blocking rules are written over the past
-(runtime-SAFE); end-of-run obligations are `TOLERATE` with `applies_to_final_answer`.
+rename the tools to your agent's (the coding-agent plugins have their own rule library on
+real tool names: see [agentltl-coding](https://github.com/AgentLTL/agentltl-coding)).
+Their blocking rules are written over the past (runtime-SAFE); end-of-run obligations are
+`TOLERATE` with `applies_to_final_answer`.
+
+Each rule does what its description says, and tests hold that: a check gates **every** action
+(a second `prescribe` needs its own `check_allergies`, not the first one's), and argument rules
+catch every spelling (`"true"`, `"PROD"`). Two limits remain, and the rule says so: the language
+cannot tie a call to *which* file, patient or beneficiary an earlier call was about (`read_before_write`
+checks that something was read), and a count such as `three_quotes_before_award` counts calls, not
+distinct bidders. Rules with severity `ASK` wait for a person; without one the runtime treats
+them as `PERSISTENT_BLOCK`. Caps such as `single_payment` are per run.
 
 | Rulebook | Rules |
 |----------|-------|
-| `devops` | tests before deploy and after the last code change, staging before prod, approval before prod, no force-push, backup before `drop_table`, never drop the prod database, one prod deploy, health check after deploy |
-| `privacy` | consent before processing, anonymize before export, no PII in exports, no transfer outside the EU, processing agreement before sharing, log every record access, erasure requests carried out |
-| `payments` | KYC + sanctions before payment, invoice matched, two approvals, call-back for a new beneficiary, no duplicate payment, quote right before order |
+| `devops` | tests before every deploy and after the last code change, staging and approval before each prod deploy, no force-push (any spelling), backup before `drop_table`, never drop the prod database, one prod deploy, health check after deploy |
+| `privacy` | consent before processing, anonymize before export, no PII in exports, transfers only to EU regions, processing agreement before sharing, log every record access, erasure requests carried out |
+| `payments` | KYC + sanctions before payment, invoice matched, approval by two roles (finance and manager), call-back after each new beneficiary, no duplicate payment, quote right before order |
 | `support` | history read before replying, customer and order looked up before refund, one refund per ticket, notify within 3 steps of escalation, nothing after close |
 | `research` | search before answering, internal documents before the web, cite sources, cite only what was read, web-search budget |
 | `budget` | total tool-call budget, bounded retries with back-off, bounded polling and sub-agents, read before write, no email bursts |

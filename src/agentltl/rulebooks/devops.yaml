@@ -13,9 +13,9 @@ name: devops
 description: 'Deployments and destructive operations.'
 
 rules:
-  # The first deploy_prod must come after the first run_tests.
+  # Every deploy_prod is preceded by a run_tests since the previous deploy_prod.
   - name: tests_before_deploy
-    formula: 'before("run_tests", "deploy_prod")'
+    formula: 'G(now("deploy_prod") -> Y((!now("deploy_prod")) S now("run_tests")))'
     severity: HARD_STOP
     weight: 3
     description: 'The test suite runs before any production deployment.'
@@ -31,42 +31,43 @@ rules:
     description: 'The tests ran after the last code change before production is deployed.'
     repair: 'The code changed since the last test run: run run_tests again, then deploy.'
 
-  # Staging is deployed (and so exercised) before production.
+  # Every production deploy is preceded by a staging deploy since the previous one.
   - name: staging_before_prod
-    formula: 'before("deploy_staging", "deploy_prod")'
+    formula: 'G(now("deploy_prod") -> Y((!now("deploy_prod")) S now("deploy_staging")))'
     severity: HARD_STOP
     weight: 2
     description: 'A release reaches staging before production.'
     repair: 'Call deploy_staging first and check it, then deploy to production.'
 
-  # ASK: a human approves. Any approve_release earlier in the run counts; together with
-  # single_prod_deploy this means one approval for one deployment.
+  # ASK: a human approves. Each deploy_prod needs its own approve_release since the
+  # previous deploy_prod.
   - name: approval_before_prod
-    formula: 'G(now("deploy_prod") -> O(now("approve_release")))'
+    formula: 'G(now("deploy_prod") -> Y((!now("deploy_prod")) S now("approve_release")))'
     severity: ASK
     weight: 3
     description: 'A production deployment needs an approved release.'
     repair: 'Call approve_release before deploy_prod.'
 
-  # Matches on the argument value: a call with force=true is refused. A force flag hidden
-  # in a free-text argument ("--force") is not seen; give git_push a boolean argument.
+  # A git_push whose force argument is true, "true", 1 or "yes" is refused. A force flag
+  # hidden in a free-text argument ("--force") is not seen; give git_push a boolean argument.
   - name: no_force_push
-    formula: '!called_with("git_push", force=true)'
+    never: {tool: git_push, where: {force: true}}
     severity: PERSISTENT_BLOCK
     weight: 2
     description: 'History on the remote is never rewritten.'
     repair: 'Push without force; rebase or merge locally instead.'
 
   - name: backup_before_drop
-    formula: 'G(now("drop_table") -> O(now("backup_db")))'
+    formula: 'G(now("drop_table") -> Y((!now("drop_table")) S now("backup_db")))'
     severity: HARD_STOP
     weight: 3
-    description: 'No table is dropped without a backup.'
+    description: 'Every table drop is preceded by a fresh backup.'
     repair: 'Call backup_db before drop_table.'
 
   # Never, backup or not: the production database is out of the agent's reach.
+  # env is compared without case; add your environment names to the list.
   - name: no_prod_db_drop
-    formula: '!called_with("drop_database", env="prod")'
+    never: {tool: drop_database, where: {env: [prod, production, prd, live]}}
     severity: HARD_STOP
     weight: 3
     description: 'The production database is never dropped.'

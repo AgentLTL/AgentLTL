@@ -5,8 +5,14 @@ import pytest
 
 pytest.importorskip("yaml")
 
-from agentltl import ConstraintSeverity, Enforcer, classify_constraints, verify_trace  # noqa: E402
-from agentltl import rulebooks  # noqa: E402
+from agentltl import (  # noqa: E402
+    Constraint,
+    ConstraintSeverity,
+    Enforcer,
+    classify_constraints,
+    rulebooks,  # noqa: E402
+    verify_trace,
+)
 from agentltl.enforcer import ACTIONS  # noqa: E402
 
 S = ConstraintSeverity
@@ -41,8 +47,10 @@ CASES = {
     # payments
     "kyc_before_payment": (["verify_identity", "check_sanctions", "execute_payment"],
                            ["verify_identity", "execute_payment"]),
-    "four_eyes_approval": (["approve_payment", "approve_payment", "execute_payment"],
-                           ["approve_payment", "execute_payment"]),
+    "four_eyes_approval": ([("approve_payment", {"role": "finance"}),
+                            ("approve_payment", {"role": "manager"}), "execute_payment"],
+                           [("approve_payment", {"role": "finance"}),
+                            ("approve_payment", {"role": "finance"}), "execute_payment"]),
     "single_payment": (["execute_payment"], ["execute_payment", "execute_payment"]),
     "fresh_quote_before_order": (["get_quote", "place_order"],
                                  ["get_quote", "check_balance", "place_order"]),
@@ -171,6 +179,83 @@ class TestEachRule:
                 assert constraint.repair in decision.feedback
 
 
+# Rules are as strict as their descriptions say. Each case: rule, a trace it must refuse, and one
+# the same rule must accept. Before the rulebooks were tightened, the first one slipped through.
+def a(name, **args):
+    return (name, args)
+
+
+STRICT = [
+    # a gate holds for EVERY action, not once per run
+    ("backup_before_drop", ["backup_db", "drop_table", "drop_table"],
+     ["backup_db", "drop_table", "backup_db", "drop_table"]),
+    ("tests_before_deploy", ["run_tests", "deploy_prod", "deploy_prod"],
+     ["run_tests", "deploy_prod", "run_tests", "deploy_prod"]),
+    ("allergies_before_prescription", ["check_allergies", "prescribe", "prescribe"],
+     ["check_allergies", "prescribe", "check_allergies", "prescribe"]),
+    ("allergies_before_prescription", ["check_allergies", "prescribe_controlled", "prescribe"],
+     ["check_allergies", "prescribe_controlled", "check_allergies", "prescribe"]),
+    ("patient_identity_first", ["prescribe_controlled"],
+     ["verify_patient_identity", "prescribe_controlled"]),
+    ("physician_for_controlled",
+     ["physician_approval", "prescribe_controlled", "prescribe_controlled"],
+     ["physician_approval", "prescribe_controlled", "physician_approval", "prescribe_controlled"]),
+    ("anonymize_before_export", ["anonymize", "export_dataset", "export_dataset"],
+     ["anonymize", "export_dataset", "anonymize", "export_dataset"]),
+    ("consent_before_processing",
+     ["check_consent", "process_personal_data", "process_personal_data"],
+     ["check_consent", "process_personal_data", "check_consent", "process_personal_data"]),
+    ("kyc_before_payment", ["verify_identity", "execute_payment"],
+     ["verify_identity", "check_sanctions", "execute_payment"]),
+    ("invoice_match_before_payment", ["match_invoice", "execute_payment", "execute_payment"],
+     ["match_invoice", "execute_payment", "match_invoice", "execute_payment"]),
+    ("order_before_refund", ["get_order", "issue_refund", "issue_refund"],
+     ["get_order", "issue_refund", "get_order", "issue_refund"]),
+    ("validate_before_load", ["validate_data", "load", "load"],
+     ["validate_data", "load", "validate_data", "load"]),
+    # the callback comes after the beneficiary was added, and again for the next one
+    ("callback_for_new_beneficiary",
+     ["callback_verification", "add_beneficiary", "execute_payment"],
+     ["add_beneficiary", "callback_verification", "execute_payment"]),
+    ("callback_for_new_beneficiary",
+     ["add_beneficiary", "callback_verification", "add_beneficiary", "execute_payment"],
+     ["add_beneficiary", "callback_verification", "add_beneficiary", "callback_verification",
+      "execute_payment"]),
+    # two approvals from two roles, not one role twice
+    ("four_eyes_approval",
+     [a("approve_payment", role="manager"), a("approve_payment", role="manager"),
+      "execute_payment"],
+     [a("approve_payment", role="manager"), a("approve_payment", role="finance"),
+      "execute_payment"]),
+    # argument values: any spelling of true / prod, and an allow-list rather than one bad value
+    ("no_force_push", [a("git_push", force="true")], [a("git_push", force="false")]),
+    ("no_force_push", [a("git_push", force=1)], [a("git_push")]),
+    ("no_prod_db_drop", [a("drop_database", env="production")], [a("drop_database", env="dev")]),
+    ("no_prod_db_drop", [a("drop_database", env="PROD")], [a("drop_database", env="staging")]),
+    ("no_pii_in_export", [a("export_dataset", include_pii="True")],
+     [a("export_dataset", include_pii=False)]),
+    ("no_transfer_outside_eu", [a("transfer_data", region="us-east-1")],
+     [a("transfer_data", region="eu-west-1")]),
+    ("no_transfer_outside_eu", [a("transfer_data")], [a("transfer_data", region="EU")]),
+    ("no_transfer_outside_eu", [a("transfer_data", region="asia")],
+     [a("transfer_data", region="europe-west1")]),
+    # the pipeline order is refused as it happens, not only at the end
+    ("pipeline_order", ["fetch_data", "transform"], ["fetch_data", "validate_data", "transform"]),
+]
+
+
+@pytest.mark.parametrize("rule, bad, good", STRICT,
+                         ids=[f"{r}-{i}" for i, (r, _, _) in enumerate(STRICT)])
+def test_rule_is_as_strict_as_it_says(rule, bad, good):
+    constraint = next(c for c, _ in RULES if c.name == rule)
+    severity = ALL.severities[rule]
+    assert verify_trace(metrics(bad), [constraint])["compliance_label"] == "VIOLATION"
+    assert verify_trace(metrics(good), [constraint])["compliance_label"] == "FULL"
+    refused = replay(constraint, severity, bad)
+    assert refused is not None and refused.constraint_name == rule
+    assert replay(constraint, severity, good) is None
+
+
 class TestEndOfRunObligations:
     def test_unmet_obligation_sends_the_agent_back(self):
         enforcer = rulebooks.load("research").enforcer(max_termination_nudges=1)
@@ -234,6 +319,82 @@ class TestLoad:
         with pytest.raises(ValueError, match=message):
             rulebooks.load(write(tmp_path, bad))
 
+    def test_applies_to_final_answer_must_be_a_boolean(self, tmp_path):
+        text = RULEBOOK.replace("    repair: 'Move it to trash.'",
+                                "    applies_to_final_answer: 'false'")
+        with pytest.raises(ValueError, match="no_rm.*true or false"):
+            rulebooks.load(write(tmp_path, text))
+
+    def test_a_bad_weight_names_the_rule(self, tmp_path):
+        text = RULEBOOK.replace("    repair: 'Move it to trash.'", "    weight: heavy")
+        with pytest.raises(ValueError, match="no_rm.*'weight' is a number"):
+            rulebooks.load(write(tmp_path, text))
+
     def test_unknown_source(self):
         with pytest.raises(ValueError, match="No rulebook 'nope'"):
             rulebooks.load("nope")
+
+
+NEVER = """\
+name: limits
+rules:
+  - name: small_payments
+    never: {tool: pay, where: {amount: {gt: 1000}}}
+  - name: eu_only
+    never: {tool: send, where: {region: {not_in: [eu, EU]}}}
+  - name: no_tmp_paths
+    never: {tool: [write, delete], where: {path: {matches: '^/tmp/'}}}
+  - name: needs_reason
+    never: {tool: delete, where: {reason: {present: false}}}
+"""
+
+
+def refused(book, name, **args):
+    enforcer = book.enforcer()
+    enforcer.begin_generation()
+    return not enforcer.check(name, args).allowed
+
+
+class TestNever:
+    """``never:`` rules: argument conditions that ``called_with`` equality cannot say."""
+
+    def test_conditions(self, tmp_path):
+        book = rulebooks.load(write(tmp_path, NEVER))
+        assert refused(book, "pay", amount=5000) and refused(book, "pay", amount="5000.50")
+        assert not refused(book, "pay", amount=1000) and not refused(book, "pay", amount=20)
+        assert refused(book, "pay", amount="a lot")          # not a number: cannot say it is small
+        assert refused(book, "send", region="us") and refused(book, "send")   # missing too
+        assert not refused(book, "send", region="eu") and not refused(book, "send", region="EU")
+        assert refused(book, "write", path="/TMP/x") and refused(book, "delete", path="/tmp/x",
+                                                                   reason="old")
+        assert not refused(book, "write", path="/home/x")
+        assert refused(book, "delete", path="/home/x")       # no reason given
+        assert not refused(book, "delete", path="/home/x", reason="stale")
+
+    def test_the_other_tools_are_untouched(self, tmp_path):
+        book = rulebooks.load(write(tmp_path, NEVER))
+        assert not refused(book, "read", amount=10 ** 9, region="us", path="/tmp/x")
+
+    @pytest.mark.parametrize("bad, message", [
+        ("never: {where: {a: 1}}", "'never' is a mapping with a 'tool'"),
+        ("never: {tool: x, wher: {a: 1}}", "unknown key"),
+        ("never: {tool: x, where: {a: {gt: many}}}", "gt takes a number"),
+        ("never: {tool: x, where: {a: {in: 1}}}", "in takes a list"),
+        ("never: {tool: x, where: {a: {oops: 1}}}", "exactly one of"),
+        ("never: {tool: x, where: {a: {matches: '('}}}", "bad regular expression"),
+        ("never: {tool: x}\n    formula: 'called(\"x\")'", "not both"),
+    ])
+    def test_malformed_never_says_what_is_wrong(self, tmp_path, bad, message):
+        text = f"name: bad\nrules:\n  - name: r\n    {bad}\n"
+        with pytest.raises(ValueError, match=message):
+            rulebooks.load(write(tmp_path, text))
+
+
+def test_now_with_is_step_local_and_round_trips():
+    from agentltl import parse
+    f = parse('G(now("pay") -> O(now_with("approve", role="finance", level=2)))')
+    assert parse(str(f)) == f
+    ok = [("approve", {"role": "finance", "level": 2}), ("pay", {})]
+    assert verify_trace(metrics(ok), [Constraint("c", f)])["compliance_label"] == "FULL"
+    other = [("approve", {"role": "finance"}), ("pay", {})]
+    assert verify_trace(metrics(other), [Constraint("c", f)])["compliance_label"] == "VIOLATION"

@@ -12,33 +12,36 @@ name: privacy
 description: 'Personal data handling (GDPR).'
 
 rules:
-  # Lawful basis (art. 6): the first processing comes after the first consent check.
+  # Lawful basis (art. 6): every processing comes after a consent check made since the
+  # previous processing.
   - name: consent_before_processing
-    formula: 'before("check_consent", "process_personal_data")'
+    formula: 'G(now("process_personal_data") -> Y((!now("process_personal_data")) S now("check_consent")))'
     severity: HARD_STOP
     weight: 3
-    description: 'Personal data is processed only after consent is checked.'
+    description: 'Each processing of personal data follows a consent check.'
     repair: 'Call check_consent for this person first.'
 
   - name: anonymize_before_export
-    formula: 'G(now("export_dataset") -> O(now("anonymize")))'
+    formula: 'G(now("export_dataset") -> Y((!now("export_dataset")) S now("anonymize")))'
     severity: PERSISTENT_BLOCK
     weight: 3
-    description: 'Datasets leave the system anonymized.'
+    description: 'Every dataset leaves the system freshly anonymized.'
     repair: 'Call anonymize on the dataset, then export it.'
 
-  # Data minimisation (art. 5): an export never asks for identifying fields.
+  # Data minimisation (art. 5): an export never asks for identifying fields
+  # (include_pii true, "true", 1 or "yes" is refused).
   - name: no_pii_in_export
-    formula: '!called_with("export_dataset", include_pii=true)'
+    never: {tool: export_dataset, where: {include_pii: true}}
     severity: PERSISTENT_BLOCK
     weight: 2
     description: 'Exports never include directly identifying fields.'
     repair: 'Export with include_pii=false.'
 
-  # Transfers outside the EU (chapter V). Only the exact value "non_eu" is caught: list
-  # your tool's region values and add one rule per forbidden region if needed.
+  # Transfers outside the EU (chapter V). Only regions named eu or europe (eu, EU,
+  # eu-west-1, europe-west1 ...) are allowed; any other region, or none, is refused. Adjust
+  # the regular expression to your tool's region names.
   - name: no_transfer_outside_eu
-    formula: '!called_with("transfer_data", region="non_eu")'
+    never: {tool: transfer_data, where: {region: {not_matches: '^(eu|europe)([-_.][a-z0-9._-]+)?$'}}}
     severity: HARD_STOP
     weight: 3
     description: 'Personal data stays in the EU.'
@@ -46,10 +49,10 @@ rules:
 
   # Processor contract (art. 28): a data processing agreement is checked before sharing.
   - name: dpa_before_third_party
-    formula: 'G(now("share_with_third_party") -> O(now("check_dpa")))'
+    formula: 'G(now("share_with_third_party") -> Y((!now("share_with_third_party")) S now("check_dpa")))'
     severity: PERSISTENT_BLOCK
     weight: 3
-    description: 'Data is shared with a third party only under a checked processing agreement.'
+    description: 'Each sharing with a third party follows a processing-agreement check.'
     repair: 'Call check_dpa for this recipient before sharing.'
 
   # X = the very next call: the access is logged right away, nothing in between.

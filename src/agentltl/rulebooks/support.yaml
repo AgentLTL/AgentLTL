@@ -24,18 +24,19 @@ rules:
     repair: 'Call lookup_customer first.'
 
   - name: order_before_refund
-    formula: 'G(now("issue_refund") -> O(now("get_order")))'
+    formula: 'G(now("issue_refund") -> Y((!now("issue_refund")) S now("get_order")))'
     severity: PERSISTENT_BLOCK
     weight: 3
     description: 'Every refund refers to an order that was looked up.'
     repair: 'Call get_order for the order being refunded.'
 
-  # One refund per ticket: a second one is refused, whatever the agent argues.
+  # One refund per run, and a run handles one ticket: a second one is refused,
+  # whatever the agent argues.
   - name: single_refund
     formula: 'called_n("issue_refund", <= 1)'
     severity: PERSISTENT_BLOCK
     weight: 2
-    description: 'At most one refund per ticket.'
+    description: 'At most one refund per run (one ticket per run).'
     repair: 'A refund was already issued; escalate if the customer needs more.'
 
   # within_steps: notify_customer comes at most 3 calls after escalate_ticket.

@@ -4,8 +4,8 @@
 # Tool names are placeholders (request_quote, check_budget, check_conflict_of_interest,
 # award_contract, accept_gift, register_gift): rename them to yours.
 #
-# Thresholds by amount (competitive tender above X) need a Predicate in Python; the
-# rules here apply to every award.
+# The rules here apply to every award. A threshold by amount (competitive tender above X)
+# can be written with `now_with` / a `never:` numeric condition (see payments.yaml).
 
 name: procurement
 description: 'Purchasing and anti-corruption.'
@@ -13,22 +13,23 @@ description: 'Purchasing and anti-corruption.'
 rules:
   # Conflict of interest: the people involved are checked against the bidders.
   - name: conflict_check_before_award
-    formula: 'G(now("award_contract") -> O(now("check_conflict_of_interest")))'
+    formula: 'G(now("award_contract") -> Y((!now("award_contract")) S now("check_conflict_of_interest")))'
     severity: HARD_STOP
     weight: 3
     description: 'No contract is awarded before a conflict-of-interest check.'
     repair: 'Call check_conflict_of_interest for the bidders.'
 
-  # Competition: count_before counts the quotes requested earlier in the run.
+  # Competition: count_before counts the quote requests made earlier in the run (not
+  # whether they went to different bidders).
   - name: three_quotes_before_award
     formula: 'G(now("award_contract") -> count_before(now("request_quote"), >= 3))'
     severity: PERSISTENT_BLOCK
     weight: 2
-    description: 'A contract is awarded after at least 3 quotes.'
+    description: 'A contract is awarded after at least 3 quotes were requested.'
     repair: 'Request more quotes before awarding.'
 
   - name: budget_check_before_award
-    formula: 'G(now("award_contract") -> O(now("check_budget")))'
+    formula: 'G(now("award_contract") -> Y((!now("award_contract")) S now("check_budget")))'
     severity: PERSISTENT_BLOCK
     weight: 2
     description: 'The budget line is checked before committing to a contract.'
@@ -38,7 +39,7 @@ rules:
     formula: 'called_n("award_contract", <= 1)'
     severity: PERSISTENT_BLOCK
     weight: 2
-    description: 'One award per purchase.'
+    description: 'One award per run.'
     repair: 'The contract is already awarded; do not award it again.'
 
   # X = the very next call: an accepted gift is registered immediately.

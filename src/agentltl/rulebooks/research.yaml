@@ -40,7 +40,7 @@ rules:
     formula: 'G(now("cite_source") -> O(now("fetch_document")))'
     severity: BLOCK_AND_WARN
     weight: 2
-    description: 'A source is cited only after a document was read.'
+    description: 'A source is cited only after some document was read.'
     repair: 'Call fetch_document on the source before citing it.'
 
   - name: web_search_budget

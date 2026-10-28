@@ -16,6 +16,13 @@ A rulebook is a YAML file::
 
 Quote formulas in single quotes: a plain YAML scalar cannot start with ``!`` or ``|``.
 
+Instead of a ``formula``, a rule can be ``never:`` a call to a tool whose arguments meet
+conditions (allowed value sets, regexes, numeric limits; see ``_conditions.py``)::
+
+      - name: no_force_push
+        never: {tool: git_push, where: {force: true}}
+        repair: 'Push without force.'
+
 The rulebooks bundled here (``available()``) use placeholder tool names: copy one and
 rename its tools to your agent's. ``load`` takes bundled names and file paths alike, and
 merges what it is given::
@@ -36,12 +43,14 @@ from dataclasses import dataclass, field
 from importlib import resources
 from typing import Any, Dict, List, Union
 
+from .._ast import Globally, Matches, Not
 from .._constraints import Constraint
 from .._parser import parse
 from ..enforcement import ConstraintSeverity
 from ..enforcer import Enforcer
+from . import _conditions
 
-_RULE_KEYS = {"name", "formula", "severity", "weight", "description", "repair",
+_RULE_KEYS = {"name", "formula", "never", "severity", "weight", "description", "repair",
               "applies_to_final_answer"}
 _BOOK_KEYS = {"name", "description", "rules"}
 
@@ -110,23 +119,37 @@ def _build(data: Any, where: str) -> Rulebook:
     book = Rulebook(str(data.get("name") or where), str(data.get("description") or ""))
     for i, rule in enumerate(data["rules"]):
         at = f"{where}: rule {rule.get('name', i + 1) if isinstance(rule, dict) else i + 1}"
-        if not isinstance(rule, dict) or not rule.get("name") or not rule.get("formula"):
-            raise ValueError(f"{at}: a rule needs a 'name' and a 'formula'")
+        if not isinstance(rule, dict) or not rule.get("name") or not (
+                rule.get("formula") or rule.get("never")):
+            raise ValueError(f"{at}: a rule needs a 'name' and a 'formula' (or 'never')")
         _no_unknown_keys(rule, _RULE_KEYS, at)
         if rule["name"] in book.severities:
             raise ValueError(f"{at}: duplicate rule name")
-        try:
-            formula = parse(str(rule["formula"]))
-        except SyntaxError as exc:
-            raise ValueError(f"{at}: {exc}") from exc
+        if rule.get("formula") and rule.get("never"):
+            raise ValueError(f"{at}: give a 'formula' or a 'never', not both")
+        if rule.get("never"):
+            matched, _ = _conditions.pattern(rule["never"], at)
+            formula = Globally(Not(Matches(matched, maybe=True)))
+        else:
+            try:
+                formula = parse(str(rule["formula"]))
+            except SyntaxError as exc:
+                raise ValueError(f"{at}: {exc}") from exc
         severity = str(rule.get("severity", "HARD_STOP"))
         if severity not in ConstraintSeverity.__members__:
             raise ValueError(f"{at}: unknown severity {severity!r}; "
                              f"use one of {list(ConstraintSeverity.__members__)}")
+        try:
+            weight = float(rule.get("weight", 1.0))
+        except (TypeError, ValueError):
+            raise ValueError(f"{at}: 'weight' is a number, not {rule['weight']!r}") from None
+        final = rule.get("applies_to_final_answer", False)
+        if not isinstance(final, bool):
+            raise ValueError(f"{at}: 'applies_to_final_answer' is true or false, not {final!r}")
         book.constraints.append(Constraint(
-            str(rule["name"]), formula, weight=float(rule.get("weight", 1.0)),
+            str(rule["name"]), formula, weight=weight,
             description=str(rule.get("description", "")), repair=str(rule.get("repair", "")),
-            applies_to_final_answer=bool(rule.get("applies_to_final_answer", False))))
+            applies_to_final_answer=final))
         book.severities[str(rule["name"])] = ConstraintSeverity[severity]
     return book
 

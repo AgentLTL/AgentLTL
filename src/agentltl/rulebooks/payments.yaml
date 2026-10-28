@@ -5,42 +5,44 @@
 # approve_payment, add_beneficiary, callback_verification, execute_payment, get_quote,
 # place_order): rename them to yours.
 #
-# The language compares argument values for equality only, so amount thresholds
-# ("approval above 10 000 EUR") cannot be written here: use a Predicate in Python.
+# An amount threshold ("approval above 10 000 EUR") is a `never:` rule with a numeric
+# condition, e.g. never: {tool: execute_payment, where: {amount: {gt: 10000}}}; give it a
+# lower severity than the rules above (ASK) if a human may override it.
 
 name: payments
 description: 'Payments and trading.'
 
 rules:
-  # all_before: every listed check happens before the first payment (multi-input gate).
+  # Both checks happen since the previous payment: every payment is screened.
   - name: kyc_before_payment
-    formula: 'all_before(["verify_identity", "check_sanctions"], "execute_payment")'
+    formula: 'G(now("execute_payment") -> (Y((!now("execute_payment")) S now("verify_identity")) & Y((!now("execute_payment")) S now("check_sanctions"))))'
     severity: HARD_STOP
     weight: 3
-    description: 'The payee is identified and screened before any payment.'
+    description: 'The payee is identified and screened before each payment.'
     repair: 'Call verify_identity and check_sanctions before execute_payment.'
 
   # Three-way match: a payment settles an invoice that was matched to an order.
   - name: invoice_match_before_payment
-    formula: 'G(now("execute_payment") -> O(now("match_invoice")))'
+    formula: 'G(now("execute_payment") -> Y((!now("execute_payment")) S now("match_invoice")))'
     severity: HARD_STOP
     weight: 2
-    description: 'A payment settles an invoice matched to its order and receipt.'
+    description: 'Each payment settles an invoice matched to its order and receipt.'
     repair: 'Call match_invoice for this invoice, then pay.'
 
-  # Four-eyes principle: count_before counts the approvals made earlier in the run. It
-  # cannot tell who approved; make approve_payment refuse a repeated approver.
+  # Four-eyes principle: one approval per role. The approval tool takes a role argument
+  # (finance, manager): rename the roles to yours. The same role twice does not count.
   - name: four_eyes_approval
-    formula: 'G(now("execute_payment") -> count_before(now("approve_payment"), >= 2))'
+    formula: 'G(now("execute_payment") -> (O(now_with("approve_payment", role="finance")) & O(now_with("approve_payment", role="manager"))))'
     severity: ASK
     weight: 3
-    description: 'A payment needs two approvals.'
+    description: 'A payment needs approval from two different roles: finance and manager.'
     repair: 'Get a second approve_payment before executing.'
 
-  # Anti-fraud (fake supplier, changed bank details): if a beneficiary was added in this
-  # run, it was confirmed by calling back a known contact before any payment.
+  # Anti-fraud (fake supplier, changed bank details): after every add_beneficiary, a
+  # callback_verification comes before any payment. A beneficiary added after the callback
+  # needs a new one.
   - name: callback_for_new_beneficiary
-    formula: 'G(now("execute_payment") -> (O(now("add_beneficiary")) -> O(now("callback_verification"))))'
+    formula: 'G(now("execute_payment") -> (!O(now("add_beneficiary")) | ((!now("add_beneficiary")) S now("callback_verification"))))'
     severity: ASK
     weight: 3
     description: 'A new beneficiary is confirmed by call-back before it is paid.'
@@ -50,7 +52,7 @@ rules:
     formula: 'called_n("execute_payment", <= 1)'
     severity: PERSISTENT_BLOCK
     weight: 2
-    description: 'A payment is executed once (no duplicates).'
+    description: 'A payment is executed once per run (no duplicates).'
     repair: 'The payment was already executed; do not repeat it.'
 
   # Y = the call just before: the quote is fresh, nothing happened in between.
