@@ -1,0 +1,58 @@
+# AgentLTL rulebook: customer support and refunds.
+#
+# For agents that answer tickets and can refund.
+# Tool names are placeholders (lookup_customer, get_ticket_history, get_order, reply,
+# issue_refund, escalate_ticket, notify_customer, close_ticket): rename them to yours.
+
+name: support
+description: 'Customer support and refunds.'
+
+rules:
+  # The agent knows the context before answering (no reply from a blank slate).
+  - name: history_before_reply
+    formula: 'G(now("reply") -> O(now("get_ticket_history")))'
+    severity: SOFT_BLOCK
+    weight: 1
+    description: 'The ticket history is read before replying.'
+    repair: 'Call get_ticket_history, then reply.'
+
+  - name: customer_before_refund
+    formula: 'before("lookup_customer", "issue_refund")'
+    severity: SOFT_BLOCK
+    weight: 2
+    description: 'The customer is identified before a refund.'
+    repair: 'Call lookup_customer first.'
+
+  - name: order_before_refund
+    formula: 'G(now("issue_refund") -> Y((!now("issue_refund")) S now("get_order")))'
+    severity: PERSISTENT_BLOCK
+    weight: 3
+    description: 'Every refund refers to an order that was looked up.'
+    repair: 'Call get_order for the order being refunded.'
+
+  # One refund per run, and a run handles one ticket: a second one is refused,
+  # whatever the agent argues.
+  - name: single_refund
+    formula: 'called_n("issue_refund", <= 1)'
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'At most one refund per run (one ticket per run).'
+    repair: 'A refund was already issued; escalate if the customer needs more.'
+
+  # within_steps: notify_customer comes at most 3 calls after escalate_ticket.
+  # BLOCK_AND_WARN: the agent may insist (repeat the same call) if it has a reason.
+  - name: notify_after_escalation
+    formula: 'within_steps("escalate_ticket", "notify_customer", 3)'
+    severity: BLOCK_AND_WARN
+    weight: 1
+    description: 'The customer hears about an escalation within 3 steps.'
+    repair: 'Call notify_customer about the escalation now.'
+
+  # Y(O(x)) = x happened strictly before this call. So: no call once the ticket is
+  # closed. The final answer is exempt (unless applies_to_final_answer).
+  - name: nothing_after_close
+    formula: 'G(!Y(O(now("close_ticket"))))'
+    severity: PERSISTENT_BLOCK
+    weight: 1
+    description: 'Once the ticket is closed, no further action runs.'
+    repair: 'The ticket is closed; give your final answer.'

@@ -1,0 +1,51 @@
+# AgentLTL rulebook: retrieval-augmented answers.
+#
+# For agents that answer from documents (internal base, then the web).
+# Tool names are placeholders (search_docs, web_search, fetch_document, cite_source):
+# rename them to yours.
+
+name: research
+description: 'Retrieval-augmented answers.'
+
+rules:
+  # F = at some point. Can only be judged when the agent wants to finish.
+  - name: search_before_answer
+    formula: 'F(called("search_docs"))'
+    severity: TOLERATE
+    weight: 2
+    description: 'The answer rests on a document search.'
+    repair: 'Call search_docs before answering.'
+    applies_to_final_answer: true
+
+  # Internal sources first: the web comes only after the document base.
+  - name: internal_before_web
+    formula: 'before("search_docs", "web_search")'
+    severity: SOFT_BLOCK
+    weight: 1
+    description: 'The internal documents are searched before the web.'
+    repair: 'Call search_docs first; search the web only if it is not enough.'
+
+  - name: cite_sources
+    formula: 'G(now("search_docs") -> F(now("cite_source")))'
+    severity: TOLERATE
+    weight: 1
+    description: 'What was searched is cited.'
+    repair: 'Call cite_source for the documents used.'
+    applies_to_final_answer: true
+
+  # Against invented citations: a source is cited only once a document has been opened.
+  # It does not check that the cited document is the one that was fetched (that needs a
+  # ForAll over the cited ids, in Python).
+  - name: cite_only_what_was_read
+    formula: 'G(now("cite_source") -> O(now("fetch_document")))'
+    severity: BLOCK_AND_WARN
+    weight: 2
+    description: 'A source is cited only after some document was read.'
+    repair: 'Call fetch_document on the source before citing it.'
+
+  - name: web_search_budget
+    formula: 'called_n("web_search", <= 5)'
+    severity: BLOCK_AND_WARN
+    weight: 1
+    description: 'At most 5 web searches per run.'
+    repair: 'Answer with what you have found.'

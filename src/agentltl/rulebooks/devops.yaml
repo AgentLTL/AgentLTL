@@ -1,0 +1,91 @@
+# AgentLTL rulebook: deployments and destructive operations.
+#
+# For coding / ops agents that can test, deploy and touch databases.
+# Tool names are placeholders (run_tests, deploy_staging, deploy_prod, edit_code,
+# approve_release, git_push, backup_db, drop_table, drop_database, health_check):
+# copy this file and rename them to your agent's tools.
+#
+# Every blocking rule looks only at the past ("before X, Y must have happened"), so the
+# enforcer refuses a call only when it really breaks a rule. The one rule about the
+# future (health check) is TOLERATE and checked when the agent wants to finish.
+
+name: devops
+description: 'Deployments and destructive operations.'
+
+rules:
+  # Every deploy_prod is preceded by a run_tests since the previous deploy_prod.
+  - name: tests_before_deploy
+    formula: 'G(now("deploy_prod") -> Y((!now("deploy_prod")) S now("run_tests")))'
+    severity: HARD_STOP
+    weight: 3
+    description: 'The test suite runs before any production deployment.'
+    repair: 'Run run_tests first, then deploy.'
+
+  # Stricter than tests_before_deploy: the tests must have run AFTER the last code
+  # change. Read: at a deploy, run_tests happened and edit_code has not happened since.
+  # SOFT_BLOCK: the agent can fix it itself by re-running the tests.
+  - name: tests_after_last_change
+    formula: 'G(now("deploy_prod") -> (!now("edit_code")) S now("run_tests"))'
+    severity: SOFT_BLOCK
+    weight: 2
+    description: 'The tests ran after the last code change before production is deployed.'
+    repair: 'The code changed since the last test run: run run_tests again, then deploy.'
+
+  # Every production deploy is preceded by a staging deploy since the previous one.
+  - name: staging_before_prod
+    formula: 'G(now("deploy_prod") -> Y((!now("deploy_prod")) S now("deploy_staging")))'
+    severity: HARD_STOP
+    weight: 2
+    description: 'A release reaches staging before production.'
+    repair: 'Call deploy_staging first and check it, then deploy to production.'
+
+  # ASK: a human approves. Each deploy_prod needs its own approve_release since the
+  # previous deploy_prod.
+  - name: approval_before_prod
+    formula: 'G(now("deploy_prod") -> Y((!now("deploy_prod")) S now("approve_release")))'
+    severity: ASK
+    weight: 3
+    description: 'A production deployment needs an approved release.'
+    repair: 'Call approve_release before deploy_prod.'
+
+  # A git_push whose force argument is true, "true", 1 or "yes" is refused. A force flag
+  # hidden in a free-text argument ("--force") is not seen; give git_push a boolean argument.
+  - name: no_force_push
+    never: {tool: git_push, where: {force: true}}
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'History on the remote is never rewritten.'
+    repair: 'Push without force; rebase or merge locally instead.'
+
+  - name: backup_before_drop
+    formula: 'G(now("drop_table") -> Y((!now("drop_table")) S now("backup_db")))'
+    severity: HARD_STOP
+    weight: 3
+    description: 'Every table drop is preceded by a fresh backup.'
+    repair: 'Call backup_db before drop_table.'
+
+  # Never, backup or not: the production database is out of the agent's reach.
+  # env is compared without case; add your environment names to the list.
+  - name: no_prod_db_drop
+    never: {tool: drop_database, where: {env: [prod, production, prd, live]}}
+    severity: HARD_STOP
+    weight: 3
+    description: 'The production database is never dropped.'
+    repair: 'Do not drop the production database; ask an operator.'
+
+  - name: single_prod_deploy
+    formula: 'called_n("deploy_prod", <= 1)'
+    severity: SOFT_BLOCK
+    weight: 1
+    description: 'At most one production deployment per run.'
+    repair: 'The release is already deployed; do not deploy it again.'
+
+  # Obligation about the future: it cannot be judged mid-run, so TOLERATE plus
+  # applies_to_final_answer (the enforcer's check_termination sends the agent back).
+  - name: health_check_after_deploy
+    formula: 'G(now("deploy_prod") -> F(now("health_check")))'
+    severity: TOLERATE
+    weight: 1
+    description: 'A production deployment is followed by a health check.'
+    repair: 'Call health_check on the deployed service.'
+    applies_to_final_answer: true

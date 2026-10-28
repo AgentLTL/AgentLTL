@@ -1,0 +1,48 @@
+# AgentLTL rulebook: extract, validate, transform, load.
+#
+# For agents that run ETL steps as tools.
+# Tool names are placeholders (fetch_data, check_schema, validate_data, transform, load,
+# fetch_users, fetch_orders, build_report): rename them to yours.
+
+name: data_pipeline
+description: 'Extract, validate, transform, load.'
+
+rules:
+  - name: schema_check_before_transform
+    formula: 'G(now("transform") -> Y((!now("transform")) S now("check_schema")))'
+    severity: SOFT_BLOCK
+    weight: 2
+    description: 'The input schema is checked before every transform.'
+    repair: 'Call check_schema on the input, then transform.'
+
+  - name: validate_before_load
+    formula: 'G(now("load") -> Y((!now("load")) S now("validate_data")))'
+    severity: HARD_STOP
+    weight: 3
+    description: 'Nothing is loaded without a validation since the previous load.'
+    repair: 'Call validate_data, then load.'
+
+  # Loading twice duplicates rows unless the load is idempotent.
+  - name: single_load
+    formula: 'called_n("load", <= 1)'
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'The data is loaded once per run.'
+    repair: 'The data is already loaded; do not load it again.'
+
+  # Fan-in: both sources are fetched before the report that joins them.
+  - name: fan_in_before_report
+    formula: 'all_before(["fetch_users", "fetch_orders"], "build_report")'
+    severity: SOFT_BLOCK
+    weight: 2
+    description: 'The report waits for both sources.'
+    repair: 'Call fetch_users and fetch_orders before build_report.'
+
+  # Each stage needs the previous one to have run: refused as it happens, not at the
+  # end. Other calls may come in between.
+  - name: pipeline_order
+    formula: 'G(now("validate_data") -> O(now("fetch_data"))) & G(now("transform") -> O(now("validate_data"))) & G(now("load") -> O(now("transform")))'
+    severity: SOFT_BLOCK
+    weight: 1
+    description: 'The pipeline runs fetch, validate, transform, load.'
+    repair: 'Complete the missing pipeline stages in order.'

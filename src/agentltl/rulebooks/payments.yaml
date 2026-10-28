@@ -1,0 +1,64 @@
+# AgentLTL rulebook: payments and trading.
+#
+# For agents that pay suppliers, refund or place orders.
+# Tool names are placeholders (verify_identity, check_sanctions, match_invoice,
+# approve_payment, add_beneficiary, callback_verification, execute_payment, get_quote,
+# place_order): rename them to yours.
+#
+# An amount threshold ("approval above 10 000 EUR") is a `never:` rule with a numeric
+# condition, e.g. never: {tool: execute_payment, where: {amount: {gt: 10000}}}; give it a
+# lower severity than the rules above (ASK) if a human may override it.
+
+name: payments
+description: 'Payments and trading.'
+
+rules:
+  # Both checks happen since the previous payment: every payment is screened.
+  - name: kyc_before_payment
+    formula: 'G(now("execute_payment") -> (Y((!now("execute_payment")) S now("verify_identity")) & Y((!now("execute_payment")) S now("check_sanctions"))))'
+    severity: HARD_STOP
+    weight: 3
+    description: 'The payee is identified and screened before each payment.'
+    repair: 'Call verify_identity and check_sanctions before execute_payment.'
+
+  # Three-way match: a payment settles an invoice that was matched to an order.
+  - name: invoice_match_before_payment
+    formula: 'G(now("execute_payment") -> Y((!now("execute_payment")) S now("match_invoice")))'
+    severity: HARD_STOP
+    weight: 2
+    description: 'Each payment settles an invoice matched to its order and receipt.'
+    repair: 'Call match_invoice for this invoice, then pay.'
+
+  # Four-eyes principle: one approval per role. The approval tool takes a role argument
+  # (finance, manager): rename the roles to yours. The same role twice does not count.
+  - name: four_eyes_approval
+    formula: 'G(now("execute_payment") -> (O(now_with("approve_payment", role="finance")) & O(now_with("approve_payment", role="manager"))))'
+    severity: ASK
+    weight: 3
+    description: 'A payment needs approval from two different roles: finance and manager.'
+    repair: 'Get a second approve_payment before executing.'
+
+  # Anti-fraud (fake supplier, changed bank details): after every add_beneficiary, a
+  # callback_verification comes before any payment. A beneficiary added after the callback
+  # needs a new one.
+  - name: callback_for_new_beneficiary
+    formula: 'G(now("execute_payment") -> (!O(now("add_beneficiary")) | ((!now("add_beneficiary")) S now("callback_verification"))))'
+    severity: ASK
+    weight: 3
+    description: 'A new beneficiary is confirmed by call-back before it is paid.'
+    repair: 'Call callback_verification on a known contact for the new beneficiary.'
+
+  - name: single_payment
+    formula: 'called_n("execute_payment", <= 1)'
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'A payment is executed once per run (no duplicates).'
+    repair: 'The payment was already executed; do not repeat it.'
+
+  # Y = the call just before: the quote is fresh, nothing happened in between.
+  - name: fresh_quote_before_order
+    formula: 'G(now("place_order") -> Y(now("get_quote")))'
+    severity: SOFT_BLOCK
+    weight: 2
+    description: 'An order is placed right after a quote.'
+    repair: 'Call get_quote immediately before place_order.'

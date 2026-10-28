@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentltl"
-version = "0.2.1"
+version = "0.2.2"
 description = "FOLTL constraint verification for LLM agent traces"
 readme = "README.md"
 license = { text = "MIT" }
@@ -33,10 +33,14 @@ smolagents = [
 native = [
     "openai>=1.0",
 ]
+yaml = [
+    "pyyaml>=6.0",
+]
 dev = [
     "pytest>=7.0",
     "hypothesis>=6.0",
     "ruff>=0.4",
+    "pyyaml>=6.0",
 ]
 
 [project.urls]
@@ -46,6 +50,9 @@ Issues = "https://github.com/AgentLTL/AgentLTL/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"agentltl.rulebooks" = ["*.yaml"]
 
 [tool.ruff]
 line-length = 100

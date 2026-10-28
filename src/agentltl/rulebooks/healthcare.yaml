@@ -1,0 +1,62 @@
+# AgentLTL rulebook: prescriptions.
+#
+# For clinical assistant agents that can prescribe or propose a prescription.
+# Tool names are placeholders (verify_patient_identity, check_allergies,
+# check_interactions, check_dosage, prescribe, prescribe_controlled, physician_approval,
+# update_medical_record): rename them to yours.
+#
+# The checks are HARD_STOP: a prescription that skipped one stops the run, it is not
+# something to retry blindly. A rule only knows that a check ran, not what it found:
+# make the check tools themselves refuse to pass on a problem.
+
+name: healthcare
+description: 'Prescriptions.'
+
+rules:
+  # Right patient first.
+  - name: patient_identity_first
+    formula: 'G((now("prescribe") | now("prescribe_controlled")) -> Y((!(now("prescribe") | now("prescribe_controlled"))) S now("verify_patient_identity")))'
+    severity: HARD_STOP
+    weight: 3
+    description: 'The patient is identified before every prescription.'
+    repair: 'Call verify_patient_identity, then prescribe.'
+
+  - name: allergies_before_prescription
+    formula: 'G((now("prescribe") | now("prescribe_controlled")) -> Y((!(now("prescribe") | now("prescribe_controlled"))) S now("check_allergies")))'
+    severity: HARD_STOP
+    weight: 3
+    description: 'Allergies are checked before every prescription.'
+    repair: 'Call check_allergies for this patient.'
+
+  - name: interactions_before_prescription
+    formula: 'G((now("prescribe") | now("prescribe_controlled")) -> Y((!(now("prescribe") | now("prescribe_controlled"))) S now("check_interactions")))'
+    severity: HARD_STOP
+    weight: 3
+    description: 'Drug interactions are checked before every prescription.'
+    repair: 'Call check_interactions with the current medication.'
+
+  - name: dosage_check_before_prescription
+    formula: 'G((now("prescribe") | now("prescribe_controlled")) -> Y((!(now("prescribe") | now("prescribe_controlled"))) S now("check_dosage")))'
+    severity: HARD_STOP
+    weight: 3
+    description: 'The dosage is checked before every prescription.'
+    repair: 'Call check_dosage for this drug and patient.'
+
+  # Controlled substances go through a separate tool so that a rule can single them out
+  # (an argument test, `now_with("prescribe", controlled=true)`, would do as well). Every
+  # check above also covers prescribe_controlled.
+  - name: physician_for_controlled
+    formula: 'G(now("prescribe_controlled") -> Y((!now("prescribe_controlled")) S now("physician_approval")))'
+    severity: ASK
+    weight: 3
+    description: 'Each controlled substance is prescribed only with a fresh physician approval.'
+    repair: 'Call physician_approval before prescribe_controlled.'
+
+  # Traceability: the record is updated before the run ends (checked at the end).
+  - name: record_after_prescription
+    formula: 'G((now("prescribe") | now("prescribe_controlled")) -> F(now("update_medical_record")))'
+    severity: TOLERATE
+    weight: 2
+    description: 'A prescription is written to the medical record.'
+    repair: 'Call update_medical_record with the prescription.'
+    applies_to_final_answer: true

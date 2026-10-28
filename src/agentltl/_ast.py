@@ -573,6 +573,13 @@ class ToolPattern(CallPattern):
     def __repr__(self) -> str:
         return f"ToolPattern({self.tools!r}, {self.args!r})"
 
+    def __eq__(self, other: object) -> bool:
+        return (isinstance(other, ToolPattern)
+                and (self.tools, self.args) == (other.tools, other.args))
+
+    def __hash__(self) -> int:
+        return hash((self.tools, _frozen(self.args)))
+
 
 @dataclass(frozen=True)
 class Matches(Formula):
@@ -587,9 +594,13 @@ class Matches(Formula):
     maybe: bool = False
 
     def __hash__(self) -> int:
-        return id(self.pattern) ^ hash(self.maybe)
+        return hash(self.pattern) ^ hash(self.maybe)
 
     def __str__(self) -> str:
+        if isinstance(self.pattern, ToolPattern) and len(self.pattern.tools) == 1 \
+                and not any(isinstance(v, Var) for v in self.pattern.args.values()):
+            args = "".join(f", {k}={_literal(v)}" for k, v in self.pattern.args.items())
+            return f'now_with("{self.pattern.tools[0]}"{args})'
         describe = getattr(self.pattern, "describe", None)
         text = describe() if describe else repr(self.pattern)
         return f"matches({text})"

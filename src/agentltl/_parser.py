@@ -25,6 +25,8 @@ Supported grammar (case-insensitive keywords)::
     function_call
              ::= 'called'       '(' STRING ')'
                | 'now'          '(' STRING ')'   -- the call at this step
+               | 'now_with'     '(' STRING (',' IDENT '=' value)* ')'
+                                                 -- the call at this step, with these arguments
                | 'before'       '(' STRING ',' STRING ')'
                | 'after'        '(' STRING ',' STRING ')'
                | 'eventually'   '(' STRING ')'
@@ -75,6 +77,7 @@ from ._ast import (
     Globally,
     Historically,
     Implies,
+    Matches,
     Next,
     Not,
     Now,
@@ -83,6 +86,7 @@ from ._ast import (
     Previous,
     Release,
     Since,
+    ToolPattern,
     Until,
     WeakUntil,
 )
@@ -349,6 +353,16 @@ class _Parser:
             tool = self._expect(_TokenType.STRING).value
             self._expect(_TokenType.RPAREN)
             return Now(tool)
+
+        if name == "now_with":
+            tool = self._expect(_TokenType.STRING).value
+            args = {}
+            while self._match(_TokenType.COMMA):
+                key = self._expect(_TokenType.IDENT).value
+                self._expect(_TokenType.EQ)
+                args[key] = self._value()
+            self._expect(_TokenType.RPAREN)
+            return Matches(ToolPattern(tool, args))
 
         if name == "before":
             a = self._expect(_TokenType.STRING).value
