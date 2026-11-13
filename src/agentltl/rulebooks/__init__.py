@@ -23,6 +23,15 @@ conditions (allowed value sets, regexes, numeric limits; see ``_conditions.py``)
         never: {tool: git_push, where: {force: true}}
         repair: 'Push without force.'
 
+Two optional keys go with a ``formula`` (see ``_binding.py``)::
+
+      - name: review_per_case
+        formula: 'G(now("apply_decision") -> O(now("human_review")))'
+        for_each: case_id        # the review is about the same case_id as the decision
+      - name: docs_checked
+        formula: 'G(now("release") -> O(now("doccheck")))'
+        succeeded: [doccheck]    # a doccheck that failed (non-zero status) does not count
+
 The rulebooks bundled here (``available()``) use placeholder tool names: copy one and
 rename its tools to your agent's. ``load`` takes bundled names and file paths alike, and
 merges what it is given::
@@ -48,10 +57,10 @@ from .._constraints import Constraint
 from .._parser import parse
 from ..enforcement import ConstraintSeverity
 from ..enforcer import Enforcer
-from . import _conditions
+from . import _binding, _conditions
 
 _RULE_KEYS = {"name", "formula", "never", "severity", "weight", "description", "repair",
-              "applies_to_final_answer"}
+              "applies_to_final_answer", "for_each", "succeeded"}
 _BOOK_KEYS = {"name", "description", "rules"}
 
 
@@ -127,6 +136,8 @@ def _build(data: Any, where: str) -> Rulebook:
             raise ValueError(f"{at}: duplicate rule name")
         if rule.get("formula") and rule.get("never"):
             raise ValueError(f"{at}: give a 'formula' or a 'never', not both")
+        if rule.get("never") and ("for_each" in rule or "succeeded" in rule):
+            raise ValueError(f"{at}: 'for_each' and 'succeeded' go with a 'formula'")
         if rule.get("never"):
             matched, _ = _conditions.pattern(rule["never"], at)
             formula = Globally(Not(Matches(matched, maybe=True)))
@@ -135,6 +146,7 @@ def _build(data: Any, where: str) -> Rulebook:
                 formula = parse(str(rule["formula"]))
             except SyntaxError as exc:
                 raise ValueError(f"{at}: {exc}") from exc
+            formula = _bound(rule, formula, at)
         severity = str(rule.get("severity", "HARD_STOP"))
         if severity not in ConstraintSeverity.__members__:
             raise ValueError(f"{at}: unknown severity {severity!r}; "
@@ -152,6 +164,20 @@ def _build(data: Any, where: str) -> Rulebook:
             applies_to_final_answer=final))
         book.severities[str(rule["name"])] = ConstraintSeverity[severity]
     return book
+
+
+def _bound(rule: Dict[str, Any], formula: Any, at: str) -> Any:
+    for_each = rule.get("for_each")
+    succeeded = rule.get("succeeded", [])
+    if for_each is None and not succeeded:
+        return formula
+    if for_each is not None and (not isinstance(for_each, str) or not for_each):
+        raise ValueError(f"{at}: 'for_each' is the name of an argument")
+    if isinstance(succeeded, str):
+        succeeded = [succeeded]
+    if not isinstance(succeeded, list) or not all(isinstance(t, str) for t in succeeded):
+        raise ValueError(f"{at}: 'succeeded' is a tool name or a list of tool names")
+    return _binding.bind(formula, for_each, succeeded, at)
 
 
 def _no_unknown_keys(data: Dict[str, Any], allowed: set, where: str) -> None:

@@ -112,14 +112,19 @@ CASES = {
     # one confirmation does not cover a second deletion
     "confirm_before_delete": (["user_confirm_deletion", "delete_account"],
                               ["user_confirm_deletion", "delete_account", "delete_account"]),
-    # ai act
+    # ai act (the steps carry the same ids as the action they gate)
     "aiact_art12_audit_logs_intact": ([("write_file", {"path": "src/app.py"})],
                                       [("edit_file", {"path": "logs/audit/2026-11.jsonl"})]),
     "aiact_art14_guardrails_untouchable": ([("edit_file", {"path": "src/app.py"})],
                                            [("edit_file", {"path": "AGENTLTL.yaml"})]),
     "aiact_art5_1c_no_social_scoring": (["credit_check"], ["social_score"]),
-    "aiact_art5_1e_no_facial_scraping": ([("face_index", {"source": "consented_upload"})],
+    "aiact_art5_1d_no_profiling_crime_prediction": (
+        [("predict_offence_risk", {"basis": "objective_facts"})],
+        [("predict_offence_risk", {"basis": "profiling"})]),
+    "aiact_art5_1e_no_facial_scraping": ([("face_index", {"source": "consented_enrolment"})],
                                          [("face_index", {"source": "web_crawl"})]),
+    "aiact_art5_1e_face_source_declared": ([("face_index", {"source": "consented_enrolment"})],
+                                           [("face_index", {})]),
     "aiact_art5_1f_emotion_context_declared": ([("detect_emotion", {"context": "medical"})],
                                                [("detect_emotion", {})]),
     "aiact_art5_1f_no_emotions_work_education": (
@@ -131,60 +136,109 @@ CASES = {
     "aiact_art5_1h_no_realtime_remote_identification": (
         [("remote_biometric_identify", {"realtime": False})],
         [("remote_biometric_identify", {"realtime": True})]),
-    "aiact_art5_1d_no_profiling_crime_prediction": (
-        [("predict_offence_risk", {"basis": "objective_facts"})],
-        [("predict_offence_risk", {"basis": "profiling"})]),
-    "aiact_art5_safety_check_before_generation": (["content_safety_check", "generate_image"],
-                                                  ["generate_image"]),
-    "aiact_art50_1_disclose_ai_interaction": (["disclose_ai_interaction", "send_message"],
-                                              ["send_message"]),
-    "aiact_art50_2_mark_before_release": (["mark_synthetic_content", "upload_media"],
-                                          ["upload_media"]),
+    "aiact_art5_safety_check_before_generation": (
+        [("content_safety_check", {"request_id": "R1"}),
+         ("generate_image", {"request_id": "R1"})],
+        [("generate_image", {"request_id": "R1"})]),
+    "aiact_art50_1_disclose_ai_interaction": (
+        [("disclose_ai_interaction", {"recipient": "ana"}),
+         ("send_message", {"recipient": "ana"})],
+        [("send_message", {"recipient": "ana"})]),
+    "aiact_art50_2_mark_before_release": (
+        [("mark_synthetic_content", {"asset_id": "A1"}), ("upload_media", {"asset_id": "A1"})],
+        [("upload_media", {"asset_id": "A1"})]),
     "aiact_art50_4_deepfake_disclosed": ([("publish_media", {"ai_disclosure": True})],
                                          [("publish_media", {"ai_disclosure": False})]),
     "aiact_art50_4_public_interest_text": (
-        ["human_editorial_review", ("publish_article", {"ai_disclosure": False})],
-        [("publish_article", {"ai_disclosure": False})]),
-    "aiact_art50_3_inform_exposed_persons": (["inform_exposed_persons", "detect_emotion"],
-                                             ["detect_emotion"]),
-    "aiact_art6_classify_before_deployment": (["classify_system", "deploy_system"],
-                                              ["deploy_system"]),
-    "aiact_art27_fria_before_use": (["fria", "enable_use_case"], ["enable_use_case"]),
-    "aiact_art9_risk_review_before_change": (["risk_review", "update_model_version"],
-                                             ["update_model_version"]),
-    "aiact_art14_human_review_per_decision": (["human_review", "apply_decision"],
-                                              ["human_review", "apply_decision",
-                                               "apply_decision"]),
+        [("human_editorial_review", {"doc_id": "D1"}),
+         ("publish_article", {"doc_id": "D1", "ai_disclosure": False})],
+        [("publish_article", {"doc_id": "D1", "ai_disclosure": False})]),
+    "aiact_art50_3_inform_exposed_persons": (
+        [("inform_exposed_persons", {"session_id": "S1"}),
+         ("detect_emotion", {"session_id": "S1"})],
+        [("detect_emotion", {"session_id": "S1"})]),
+    "aiact_art6_classify_before_deployment": (
+        [("classify_system", {"system": "cv"}), ("deploy_system", {"system": "cv"})],
+        [("deploy_system", {"system": "cv"})]),
+    "aiact_art43_conformity_before_market": (
+        [("conformity_assessment", {"system": "cv"}),
+         ("deploy_system", {"system": "cv", "risk_class": "high"})],
+        [("deploy_system", {"system": "cv", "risk_class": "high"})]),
+    "aiact_art49_registration_before_market": (
+        [("register_eu_database", {"system": "cv"}),
+         ("deploy_system", {"system": "cv", "risk_class": "high"})],
+        [("deploy_system", {"system": "cv", "risk_class": "high"})]),
+    "aiact_art27_fria_before_use": ([("fria", {"system": "cv"}),
+                                     ("enable_use_case", {"system": "cv"})],
+                                    [("enable_use_case", {"system": "cv"})]),
+    "aiact_art26_7_inform_workers": (
+        [("inform_worker_representatives", {"system": "cv"}),
+         ("enable_use_case", {"system": "cv", "context": "workplace"})],
+        [("enable_use_case", {"system": "cv", "context": "workplace"})]),
+    "aiact_art9_risk_review_before_change": (
+        [("risk_review", {"system": "cv"}), ("update_model_version", {"system": "cv"})],
+        [("update_model_version", {"system": "cv"})]),
+    "aiact_art14_human_review_per_decision": (
+        [("human_review", {"case_id": "C1"}), ("apply_decision", {"case_id": "C1"})],
+        [("human_review", {"case_id": "C1"}), ("apply_decision", {"case_id": "C1"}),
+         ("apply_decision", {"case_id": "C1"})]),
     "aiact_art14_human_confirms_decision": (["human_review"], ["apply_decision"]),
-    "aiact_art26_11_inform_affected_person": (["inform_affected_person", "apply_decision"],
-                                              ["apply_decision"]),
-    "aiact_art12_log_before_decision": (["log_event", "apply_decision"], ["apply_decision"]),
-    "aiact_art12_log_after_decision": (["apply_decision", "log_event"], ["apply_decision"]),
+    "aiact_art26_11_inform_affected_person": (
+        [("inform_affected_person", {"person_id": "P1"}),
+         ("apply_decision", {"person_id": "P1"})],
+        [("apply_decision", {"person_id": "P1"})]),
+    "aiact_art86_explanation_provided": (
+        [("explanation_request", {"person_id": "P1"}),
+         ("provide_explanation", {"person_id": "P1"})],
+        [("explanation_request", {"person_id": "P1"})]),
+    "aiact_art12_log_before_decision": (
+        [("log_event", {"case_id": "C1"}), ("apply_decision", {"case_id": "C1"})],
+        [("apply_decision", {"case_id": "C1"})]),
+    "aiact_art12_log_after_decision": (
+        [("apply_decision", {"case_id": "C1"}), ("log_event", {"case_id": "C1"})],
+        [("apply_decision", {"case_id": "C1"})]),
     "aiact_art14_automation_cap": (["apply_decision"] * 20, ["apply_decision"] * 21),
-    "aiact_art10_datasheet_before_training": (["edit_dataset", "datasheet", "train_model"],
-                                              ["datasheet", "edit_dataset", "train_model"]),
+    "aiact_art10_datasheet_before_training": (
+        [("edit_dataset", {"dataset": "d"}), ("datasheet", {"dataset": "d"}),
+         ("train_model", {"dataset": "d"})],
+        [("datasheet", {"dataset": "d"}), ("edit_dataset", {"dataset": "d"}),
+         ("train_model", {"dataset": "d"})]),
     "aiact_art10_bias_examination_before_training": (
-        ["bias_examination", "finetune_model"], ["bias_examination", "edit_dataset",
-                                                 "finetune_model"]),
+        [("bias_examination", {"dataset": "d"}), ("finetune_model", {"dataset": "d"})],
+        [("bias_examination", {"dataset": "d"}), ("edit_dataset", {"dataset": "d"}),
+         ("finetune_model", {"dataset": "d"})]),
     "aiact_art4a_sensitive_data_dedicated_tool": ([("load_dataset", {"category": "sales"})],
                                                   [("load_dataset", {"category": "health"})]),
     "aiact_art4a_sensitive_access_approved": (["load_dataset"], ["load_sensitive_data"]),
-    "aiact_art4a_delete_after_use": (["load_sensitive_data", "delete_sensitive_data"],
-                                     ["load_sensitive_data", "train_model"]),
-    "aiact_art53_1c_tdm_optout_checked": (["check_tdm_optout", "crawl"],
-                                          ["check_tdm_optout", "crawl", "crawl"]),
-    "aiact_art53_1d_training_summary": (["training_summary", "release_model"],
-                                        ["release_model"]),
-    "aiact_art53_1a_documentation_up_to_date": (["train_model", "doccheck", "release_model"],
-                                                ["doccheck", "train_model", "release_model"]),
-    "aiact_art55_adversarial_evals": (["finetune_model", "run_adversarial_evals",
-                                       "release_model"],
-                                      ["run_adversarial_evals", "finetune_model",
-                                       "release_model"]),
+    "aiact_art4a_delete_after_use": (
+        [("load_sensitive_data", {"dataset": "d"}),
+         ("delete_sensitive_data", {"dataset": "d"})],
+        [("load_sensitive_data", {"dataset": "d"}), ("train_model", {"dataset": "d"})]),
+    "aiact_art53_1c_tdm_optout_checked": (
+        [("check_tdm_optout", {"domain": "a.org"}), ("crawl", {"domain": "a.org"}),
+         ("crawl", {"domain": "a.org"})],
+        [("crawl", {"domain": "a.org"})]),
+    "aiact_art53_1d_training_summary": (
+        [("training_summary", {"model": "m"}), ("release_model", {"model": "m"})],
+        [("release_model", {"model": "m"})]),
+    "aiact_art53_1a_documentation_up_to_date": (
+        [("train_model", {"model": "m"}), ("doccheck", {"model": "m"}),
+         ("release_model", {"model": "m"})],
+        [("doccheck", {"model": "m"}), ("train_model", {"model": "m"}),
+         ("release_model", {"model": "m"})]),
+    "aiact_art55_adversarial_evals": (
+        [("finetune_model", {"model": "m"}), ("run_adversarial_evals", {"model": "m"}),
+         ("release_model", {"model": "m"})],
+        [("run_adversarial_evals", {"model": "m"}), ("finetune_model", {"model": "m"}),
+         ("release_model", {"model": "m"})]),
     "aiact_art55_incident_reported_to_ai_office": (
-        ["flag_serious_incident", "report_incident_ai_office"], ["flag_serious_incident"]),
-    "aiact_art73_incident_reported": (["flag_serious_incident", "report_serious_incident"],
-                                      ["flag_serious_incident"]),
+        [("flag_serious_incident", {"incident_id": "I1"}),
+         ("report_incident_ai_office", {"incident_id": "I1"})],
+        [("flag_serious_incident", {"incident_id": "I1"})]),
+    "aiact_art73_incident_reported": (
+        [("flag_serious_incident", {"incident_id": "I1"}),
+         ("report_serious_incident", {"incident_id": "I1"})],
+        [("flag_serious_incident", {"incident_id": "I1"})]),
     "aiact_art73_report_quickly": (["flag_serious_incident", "report_serious_incident"],
                                    ["flag_serious_incident"] + ["read_logs"] * 6
                                    + ["report_serious_incident"]),
@@ -329,26 +383,73 @@ STRICT = [
      [a("transfer_data", region="europe-west1")]),
     # the pipeline order is refused as it happens, not only at the end
     ("pipeline_order", ["fetch_data", "transform"], ["fetch_data", "validate_data", "transform"]),
-    # ai act: one human review covers one decision, of any kind
+    # ai act: a review, notice or check of ANOTHER case, person, asset or domain opens nothing
     ("aiact_art14_human_review_per_decision",
-     ["human_review", "apply_decision", "reject_application"],
-     ["human_review", "apply_decision", "human_review", "reject_application"]),
-    # each release is marked again; a missing disclosure flag counts as no disclosure
+     [a("human_review", case_id="C2"), a("apply_decision", case_id="C1")],
+     [a("human_review", case_id="C1"), a("human_review", case_id="C2"),
+      a("apply_decision", case_id="C1"), a("apply_decision", case_id="C2")]),
+    # one review covers one decision, of any kind
+    ("aiact_art14_human_review_per_decision",
+     [a("human_review", case_id="C1"), a("apply_decision", case_id="C1"),
+      a("reject_application", case_id="C1")],
+     [a("human_review", case_id="C1"), a("apply_decision", case_id="C1"),
+      a("human_review", case_id="C1"), a("reject_application", case_id="C1")]),
+    # a decision without case_id is not covered by the review of a named case
+    ("aiact_art14_human_review_per_decision",
+     [a("human_review", case_id="C1"), a("apply_decision")],
+     [a("human_review"), a("apply_decision")]),
+    ("aiact_art26_11_inform_affected_person",
+     [a("inform_affected_person", person_id="P2"), a("reject_application", person_id="P1")],
+     [a("inform_affected_person", person_id="P1"), a("reject_application", person_id="P1")]),
+    ("aiact_art50_1_disclose_ai_interaction",
+     [a("disclose_ai_interaction", recipient="ana"), a("send_message", recipient="bob")],
+     [a("disclose_ai_interaction", recipient="ana"), a("send_message", recipient="ana"),
+      a("post_reply", recipient="ana")]),
     ("aiact_art50_2_mark_before_release",
-     ["mark_synthetic_content", "upload_media", "export_asset"],
-     ["mark_synthetic_content", "upload_media", "mark_synthetic_content", "export_asset"]),
+     [a("mark_synthetic_content", asset_id="A1"), a("upload_media", asset_id="A2")],
+     [a("mark_synthetic_content", asset_id="A1"), a("upload_media", asset_id="A1"),
+      a("export_asset", asset_id="A1")]),
+    ("aiact_art53_1c_tdm_optout_checked",
+     [a("check_tdm_optout", domain="a.org"), a("crawl", domain="b.org")],
+     [a("check_tdm_optout", domain="a.org"), a("check_tdm_optout", domain="b.org"),
+      a("crawl", domain="b.org")]),
+    ("aiact_art5_safety_check_before_generation",
+     [a("content_safety_check", request_id="R1"), a("generate_video", request_id="R2")],
+     [a("content_safety_check", request_id="R2"), a("generate_video", request_id="R2")]),
+    # an unlabelled article: ai_disclosure missing counts as false; true needs no review
+    ("aiact_art50_4_public_interest_text", [a("publish_article", doc_id="D1")],
+     [a("publish_article", doc_id="D1", ai_disclosure=True)]),
     ("aiact_art50_4_deepfake_disclosed", [a("publish_media")],
      [a("publish_media", ai_disclosure="yes")]),
-    # the safety check is for THIS generation, not one made earlier
-    ("aiact_art5_safety_check_before_generation",
-     ["content_safety_check", "generate_image", "generate_video"],
-     ["content_safety_check", "generate_image", "content_safety_check", "generate_video"]),
-    # prohibited contexts and sources match any spelling of the prefix
+    # an unstated risk class counts as high; a stated minimal one needs no assessment
+    ("aiact_art43_conformity_before_market", [a("deploy_system", system="cv")],
+     [a("deploy_system", system="cv", risk_class="minimal")]),
+    # the same step about another dataset or model does not count
+    ("aiact_art10_datasheet_before_training",
+     [a("datasheet", dataset="d2"), a("train_model", dataset="d1")],
+     [a("datasheet", dataset="d1"), a("edit_dataset", dataset="d2"),
+      a("train_model", dataset="d1")]),
+    ("aiact_art55_adversarial_evals",
+     [a("run_adversarial_evals", model="m2"), a("release_model", model="m1")],
+     [a("run_adversarial_evals", model="m1"), a("train_model", model="m2"),
+      a("release_model", model="m1")]),
+    # prohibited contexts, sources and attributes: any spelling, and lawful ones pass
     ("aiact_art5_1f_no_emotions_work_education",
      [a("detect_emotion", context="Recruitment interview")],
-     [a("detect_emotion", context="safety")]),
+     [a("detect_emotion", context="medical_examination")]),
+    ("aiact_art5_1f_no_emotions_work_education", [a("detect_emotion", context="HR")],
+     [a("detect_emotion", context="hrv_monitoring")]),
+    ("aiact_art5_1g_no_biometric_categorisation",
+     [a("biometric_categorize", attribute="sexual_orientation")],
+     [a("biometric_categorize", attribute="sex")]),
     ("aiact_art5_1e_no_facial_scraping", [a("build_face_database", source="https://x.org")],
      [a("build_face_database", source="employee_badges")]),
+    ("aiact_art5_1d_no_profiling_crime_prediction", [a("crime_risk_score")],
+     [a("crime_risk_score", basis="verifiable facts")]),
+    ("aiact_art5_1h_no_realtime_remote_identification", [a("remote_biometric_identify")],
+     [a("remote_biometric_identify", realtime="false")]),
+    ("aiact_dev_biometric_libraries", [("install_package", {"name": "fer==22.5"})],
+     [("install_package", {"name": "ferret"})]),
     # audit logs and guard files, on Windows paths too
     ("aiact_art12_audit_logs_intact", [a("delete_file", path=r"C:\app\logs\audit\day.jsonl")],
      [a("delete_file", path=r"C:\app\logs\debug.log")]),
@@ -515,3 +616,76 @@ def test_now_with_is_step_local_and_round_trips():
     assert verify_trace(metrics(ok), [Constraint("c", f)])["compliance_label"] == "FULL"
     other = [("approve", {"role": "finance"}), ("pay", {})]
     assert verify_trace(metrics(other), [Constraint("c", f)])["compliance_label"] == "VIOLATION"
+
+
+BOUND = """\
+name: bound
+rules:
+  - name: review_per_case
+    formula: 'G(now("decide") -> O(now("review")))'
+    for_each: case_id
+    severity: PERSISTENT_BLOCK
+    repair: 'Review this case first.'
+  - name: docs_checked
+    formula: 'G(now("release") -> ((!now("train")) S now("doccheck")))'
+    succeeded: doccheck
+    severity: PERSISTENT_BLOCK
+    repair: 'Run doccheck until it passes.'
+"""
+
+
+class TestForEachAndSucceeded:
+    def test_for_each_ties_the_step_to_the_same_argument(self, tmp_path):
+        book = rulebooks.load(write(tmp_path, BOUND))
+        enforcer = book.enforcer()
+        enforcer.record_completed("review", {"case_id": "C2"})
+        assert enforcer.check("decide", {"case_id": "C1"}).action == "block"
+        assert enforcer.check("decide", {"case_id": "C2"}).allowed
+        enforcer.record_completed("review", {"case_id": "C1"})
+        assert enforcer.check("decide", {"case_id": "C1"}).allowed
+
+    def test_a_failed_step_does_not_count(self, tmp_path):
+        book = rulebooks.load(write(tmp_path, BOUND))
+        failed = book.enforcer()
+        failed.record_completed("doccheck", {}, status=1)
+        assert failed.check("release", {}).action == "block"
+        refused = book.enforcer()
+        refused.record_completed("doccheck", {}, result={"ok": False})
+        assert refused.check("release", {}).action == "block"
+        passed = book.enforcer()
+        passed.record_completed("doccheck", {}, status=0)
+        assert passed.check("release", {}).allowed
+
+    def test_status_in_a_trace_is_read_post_hoc(self, tmp_path):
+        book = rulebooks.load(write(tmp_path, BOUND))
+        rule = [c for c in book.constraints if c.name == "docs_checked"]
+        trace = {"tool_calls": [{"tool_name": "doccheck", "arguments": {}, "status": 2},
+                                {"tool_name": "release", "arguments": {}}]}
+        assert verify_trace(trace, rule)["compliance_label"] == "VIOLATION"
+        trace["tool_calls"][0]["status"] = 0
+        assert verify_trace(trace, rule)["compliance_label"] == "FULL"
+
+    def test_bound_rules_are_runtime_safe(self, tmp_path):
+        book = rulebooks.load(write(tmp_path, BOUND))
+        assert all(r.compatible for r in classify_constraints(book.constraints, book.severities))
+
+    def test_ai_act_doccheck_must_pass(self):
+        book = rulebooks.load("ai_act")
+        rule = [c for c in book.constraints if c.name == "aiact_dev_doccheck_after_last_change"]
+        enforcer = Enforcer(rule, {rule[0].name: book.severities[rule[0].name]})
+        enforcer.record_completed("doccheck", {}, status=1)
+        assert enforcer.check("deploy_prod", {}).action == "block"
+        enforcer.record_completed("doccheck", {}, status=0)
+        assert enforcer.check("deploy_prod", {}).allowed
+
+    @pytest.mark.parametrize("bad, message", [
+        ("formula: 'O(now(\"a\"))'\n    for_each: x", "a for_each rule is a G"),
+        ("formula: 'G(called(\"a\"))'\n    for_each: x", r"now\(\) and now_with\(\) only"),
+        ("formula: 'G(now(\"a\"))'\n    for_each: [x]", "'for_each' is the name of an argument"),
+        ("formula: 'G(now(\"a\"))'\n    succeeded: {a: 1}", "'succeeded' is a tool name"),
+        ("never: {tool: x}\n    for_each: y", "go with a 'formula'"),
+    ])
+    def test_malformed_keys_say_what_is_wrong(self, tmp_path, bad, message):
+        text = f"name: bad\nrules:\n  - name: r\n    {bad}\n"
+        with pytest.raises(ValueError, match=message):
+            rulebooks.load(write(tmp_path, text))
