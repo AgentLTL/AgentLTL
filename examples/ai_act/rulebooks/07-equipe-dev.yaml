@@ -1,0 +1,95 @@
+# ─────────────────────────────────────────────────────────────────────
+# AI Act · Module 07 — Agents de code (Claude Code, Copilot CLI,
+# Mistral Vibe, Codex) dans une équipe qui construit un système d'IA.
+# S'appuie sur une petite CLI interne « aiact » (à créer, voir plan),
+# décrite ci-dessous pour que les règles puissent nommer ses arguments.
+# ─────────────────────────────────────────────────────────────────────
+use:
+  - theme-release-safety      # tests avant push, plan avant apply, prod → humain
+
+rules:
+  - id: aiact-dev-classification-avant-prod
+    before:
+      first: {tool: aiact_classify, with: {system: $s}}
+      then:  {tool: helm_upgrade, with: {release: $s, namespace: prod}}
+    scope: project
+    why: >-
+      Art. 6 — un système ne part pas en production sans classification de
+      risque enregistrée pour ce même système.
+    fix: Lancez `aiact classify --system <release>` puis redéployez.
+
+  - id: aiact-dev-doc-technique-a-jour
+    before:
+      first: {tool: aiact_doccheck, succeeded: true}
+      then:  {tool: helm_upgrade, with: {namespace: prod}}
+      since: {tool: [Edit, Write], where: {file_path: ["src/**", "models/**", "prompts/**"]}}
+    why: >-
+      Art. 11 et annexe IV — la documentation technique décrit la version
+      déployée ; tout changement de code, de modèle ou de prompt la rend
+      obsolète.
+    fix: Mettez à jour docs/annexe-iv puis lancez `aiact doccheck` (il doit réussir).
+
+  - id: aiact-dev-evaluations-avant-publication
+    before:
+      first: {tool: aiact_evals, succeeded: true}
+      then:
+        - {tool: helm_upgrade, with: {namespace: prod}}
+        - {tool: huggingface-cli, with: {argv: upload}}
+        - {tool: hf, with: {argv: upload}}
+      since: {tool: [Edit, Write], where: {file_path: ["src/**", "models/**", "prompts/**"]}}
+    why: >-
+      Art. 15 — exactitude, robustesse et cybersécurité sont mesurées sur la
+      version publiée (suite d'évaluation, biais, red-teaming).
+    fix: Lancez `aiact evals` après votre dernière modification.
+
+  - id: aiact-dev-fiche-donnees-avant-entrainement
+    before:
+      first: {tool: aiact_datasheet, succeeded: true}
+      then:  {tool: [python, python3], where: {script: ["train*.py", "**/train*.py", "finetune*.py", "**/finetune*.py"]}}
+      since: {tool: [Edit, Write], where: {file_path: ["data/**", "datasets/**"]}}
+    why: >-
+      Art. 10 — les données d'entraînement modifiées sont documentées avant
+      tout entraînement.
+
+  - id: aiact-dev-registre-conformite
+    never: [Edit, Write, rm, mv, sed, tee]
+    where: {"*": ["compliance/**", "docs/annexe-iv/**"]}
+    why: >-
+      Art. 11, 17 et 18 — le registre de classification, la FRIA et la
+      documentation technique sont des pièces du système de gestion de la
+      qualité ; leur modification est validée par un humain.
+    mode: ask
+
+  - id: aiact-dev-bibliotheques-biometriques
+    never:
+      - {tool: pip_install, where: {"*": ["deepface*", "face_recognition*", "fer", "fer==*", "insightface*", "py-feat*", "hsemotion*"]}}
+      - {tool: [npm, yarn, pnpm], where: {argv: ["face-api*", "@vladmandic/face-api*", "@vladmandic/human*"]}}
+    why: >-
+      Art. 5(1)(e)-(g) et annexe III(1) — la biométrie et la reconnaissance
+      d'émotions sont interdites ou à haut risque selon le contexte ; leur
+      introduction dans le code est une décision humaine.
+    mode: ask
+
+  - id: aiact-dev-tests-transparence
+    finally:
+      call:  {tool: pytest, succeeded: true}
+      since: {tool: [Edit, Write], where: {file_path: ["**/*disclos*", "**/*watermark*", "**/*marking*", "**/*c2pa*"]}}
+    why: >-
+      Art. 50 — le code de divulgation et de marquage est une obligation
+      légale : on ne rend pas la main sans que ses tests passent.
+    fix: Lancez pytest et corrigez jusqu'au vert.
+
+tools:
+  aiact:
+    subcommands:
+      classify:  {options: [{flags: [--system]}]}
+      fria:      {options: [{flags: [--system]}]}
+      doccheck:  {options: [{flags: [--system]}]}
+      evals:     {options: [{flags: [--system]}, {flags: [--suite]}]}
+      datasheet: {options: [{flags: [--dataset]}]}
+      mark:      {options: [{flags: [--asset]}]}
+  helm:
+    options:
+      - {flags: [-n, --namespace], global: true}
+    subcommands:
+      upgrade: {positionals: [{name: release}, {name: chart}]}

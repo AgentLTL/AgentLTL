@@ -1,0 +1,89 @@
+# ─────────────────────────────────────────────────────────────────────
+# AI Act · Module 03 — Systèmes à haut risque (art. 6, 9, 12, 14, 26, 27)
+# Annexe III (emploi, crédit, éducation, biométrie, infrastructures...) :
+# applicable le 2 décembre 2027 ; annexe I (produits réglementés) :
+# 2 août 2028 (Omnibus). À activer dès maintenant pour constituer la preuve.
+# ─────────────────────────────────────────────────────────────────────
+rules:
+  - id: aiact-art6-classification-prealable
+    before:
+      first: {tool: mcp__aiact__classify, with: {system: $s}}
+      then:
+        - {tool: "mcp__*__deploy_system", with: {system: $s}}
+        - {tool: "mcp__*__enable_use_case", with: {system: $s}}
+    scope: project
+    why: >-
+      Art. 6 et annexe III — on ne met pas en service un cas d'usage sans
+      avoir déterminé s'il est à haut risque : toutes les autres obligations
+      en découlent.
+    fix: Lancez mcp__aiact__classify pour ce système, puis redemandez le déploiement.
+
+  - id: aiact-art27-fria-prealable
+    before:
+      first: {tool: mcp__aiact__fria, with: {system: $s}}
+      then:  {tool: "mcp__*__enable_use_case", with: {system: $s}}
+    scope: project
+    why: >-
+      Art. 27 — certains déployeurs (organismes publics, services publics,
+      crédit et assurance-vie/santé) doivent réaliser une analyse d'impact
+      sur les droits fondamentaux avant la première utilisation.
+    fix: Réalisez mcp__aiact__fria (elle peut s'appuyer sur l'AIPD RGPD).
+
+  - id: aiact-art9-revue-risques-avant-changement
+    before:
+      first: {tool: mcp__aiact__risk_review, with: {system: $s}}
+      then:  {tool: ["mcp__*__update_model_version", "mcp__*__change_prompt_policy"], with: {system: $s}}
+    scope: project
+    why: >-
+      Art. 9 — le système de gestion des risques couvre tout le cycle de vie :
+      un changement de modèle ou de politique se fait après revue des risques.
+
+  - id: aiact-art14-revue-humaine-par-dossier
+    before:
+      first: {tool: mcp__aiact__human_review, with: {case_id: $c}}
+      then:  {tool: ["mcp__*__apply_decision", "mcp__*__notify_decision", "mcp__*__reject_application", "mcp__*__terminate_contract"], with: {case_id: $c}}
+    scope: project
+    why: >-
+      Art. 14 et art. 26(2) — une décision produisant des effets sur une
+      personne est soumise à un contrôle humain effectif, dossier par
+      dossier ; la recommandation de l'IA ne vaut pas décision.
+    fix: Soumettez le dossier via mcp__aiact__human_review et attendez sa validation.
+
+  - id: aiact-art14-confirmation-humaine
+    never: ["mcp__*__apply_decision", "mcp__*__reject_application", "mcp__*__terminate_contract"]
+    why: >-
+      Art. 14(4) — l'humain doit pouvoir décider de ne pas suivre le système
+      et l'interrompre ; chaque décision conséquente lui est présentée.
+    mode: ask
+
+  - id: aiact-art26-11-information-personne
+    before:
+      first: {tool: mcp__aiact__inform_affected_person, with: {person_id: $p}}
+      then:  {tool: "mcp__*__apply_decision", with: {person_id: $p}}
+    scope: project
+    why: >-
+      Art. 26(11) et art. 86 — la personne concernée par une décision fondée
+      sur un système à haut risque doit être informée de son utilisation, et
+      peut obtenir une explication.
+
+  - id: aiact-art12-trace-par-decision
+    before:
+      first: {tool: mcp__aiact__log_event, with: {case_id: $c}}
+      then:  {tool: "mcp__*__apply_decision", with: {case_id: $c}}
+    why: >-
+      Art. 12 — la journalisation doit permettre de retracer chaque
+      décision (données d'entrée, recommandation, vérificateur humain).
+
+  - id: aiact-art12-trace-de-cloture
+    finally: {call: mcp__aiact__log_event, since: ["mcp__*__apply_decision", "mcp__*__notify_decision"]}
+    why: >-
+      Art. 12 — le résultat final de chaque décision doit être journalisé
+      avant de rendre la main.
+    fix: Appelez mcp__aiact__log_event avec le résultat de la dernière décision.
+
+  - id: aiact-art14-plafond-automatisation
+    at_most: {call: "mcp__*__apply_decision", times: 20}
+    why: >-
+      Art. 14(4)(b) — prévenir le biais d'automatisation : au-delà de
+      20 décisions dans une session, un humain vérifie la série.
+    mode: ask

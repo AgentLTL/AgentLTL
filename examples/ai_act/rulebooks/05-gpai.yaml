@@ -1,0 +1,51 @@
+# ─────────────────────────────────────────────────────────────────────
+# AI Act · Module 05 — Fournisseurs de modèles d'IA à usage général
+# (art. 53 ; art. 55 pour les modèles à risque systémique)
+# Applicable depuis le 2 août 2025 ; pouvoirs de sanction de la
+# Commission depuis le 2 août 2026.
+# ─────────────────────────────────────────────────────────────────────
+rules:
+  - id: aiact-art53-1c-respect-optout-tdm
+    before:
+      first: {tool: mcp__aiact__check_tdm_optout, with: {domain: $d}}
+      then:  {tool: ["mcp__*__crawl", "mcp__*__fetch_for_training"], with: {domain: $d}}
+    scope: project
+    why: >-
+      Art. 53(1)(c) et directive (UE) 2019/790 art. 4(3) — la politique
+      droit d'auteur du fournisseur doit respecter les réserves de droits
+      (opt-out) exprimées par les titulaires.
+    fix: Vérifiez l'opt-out du domaine (robots.txt, TDMRep, métadonnées) avant de collecter.
+
+  - id: aiact-art53-1d-resume-donnees
+    before:
+      - {tool: mcp__aiact__training_summary, succeeded: true}
+      - "mcp__*__release_model"
+    scope: project
+    why: >-
+      Art. 53(1)(d) — un résumé suffisamment détaillé du contenu
+      d'entraînement, selon le modèle de l'AI Office, est publié avec le modèle.
+
+  - id: aiact-art53-1a-documentation-a-jour
+    before:
+      first: {tool: mcp__aiact__doccheck, succeeded: true}
+      then:  "mcp__*__release_model"
+      since: ["mcp__*__train_model", "mcp__*__finetune_model"]
+    why: >-
+      Art. 53(1)(a)-(b) — la documentation technique et l'information des
+      fournisseurs en aval doivent décrire le modèle effectivement publié.
+    fix: Mettez à jour la documentation et relancez mcp__aiact__doccheck après le dernier entraînement.
+
+  - id: aiact-art55-evaluations-adversariales
+    before:
+      first: {tool: mcp__aiact__run_adversarial_evals, succeeded: true}
+      then:  "mcp__*__release_model"
+      since: ["mcp__*__train_model", "mcp__*__finetune_model"]
+    why: >-
+      Art. 55(1)(a) — un modèle à risque systémique est évalué, y compris par
+      des tests adversariaux, sur la version qui sera publiée.
+
+  - id: aiact-art55-signalement-incident
+    finally: {call: mcp__aiact__report_incident, since: mcp__aiact__flag_serious_incident}
+    why: >-
+      Art. 55(1)(c) — les incidents graves sont suivis, documentés et
+      signalés sans retard injustifié à l'AI Office.

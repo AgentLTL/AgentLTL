@@ -112,6 +112,93 @@ CASES = {
     # one confirmation does not cover a second deletion
     "confirm_before_delete": (["user_confirm_deletion", "delete_account"],
                               ["user_confirm_deletion", "delete_account", "delete_account"]),
+    # ai act
+    "aiact_art12_audit_logs_intact": ([("write_file", {"path": "src/app.py"})],
+                                      [("edit_file", {"path": "logs/audit/2026-11.jsonl"})]),
+    "aiact_art14_guardrails_untouchable": ([("edit_file", {"path": "src/app.py"})],
+                                           [("edit_file", {"path": "AGENTLTL.yaml"})]),
+    "aiact_art5_1c_no_social_scoring": (["credit_check"], ["social_score"]),
+    "aiact_art5_1e_no_facial_scraping": ([("face_index", {"source": "consented_upload"})],
+                                         [("face_index", {"source": "web_crawl"})]),
+    "aiact_art5_1f_emotion_context_declared": ([("detect_emotion", {"context": "medical"})],
+                                               [("detect_emotion", {})]),
+    "aiact_art5_1f_no_emotions_work_education": (
+        [("emotion_recognition", {"context": "medical"})],
+        [("emotion_recognition", {"context": "workplace"})]),
+    "aiact_art5_1g_no_biometric_categorisation": (
+        [("biometric_categorize", {"attribute": "age_range"})],
+        [("biometric_categorize", {"attribute": "religion"})]),
+    "aiact_art5_1h_no_realtime_remote_identification": (
+        [("remote_biometric_identify", {"realtime": False})],
+        [("remote_biometric_identify", {"realtime": True})]),
+    "aiact_art5_1d_no_profiling_crime_prediction": (
+        [("predict_offence_risk", {"basis": "objective_facts"})],
+        [("predict_offence_risk", {"basis": "profiling"})]),
+    "aiact_art5_safety_check_before_generation": (["content_safety_check", "generate_image"],
+                                                  ["generate_image"]),
+    "aiact_art50_1_disclose_ai_interaction": (["disclose_ai_interaction", "send_message"],
+                                              ["send_message"]),
+    "aiact_art50_2_mark_before_release": (["mark_synthetic_content", "upload_media"],
+                                          ["upload_media"]),
+    "aiact_art50_4_deepfake_disclosed": ([("publish_media", {"ai_disclosure": True})],
+                                         [("publish_media", {"ai_disclosure": False})]),
+    "aiact_art50_4_public_interest_text": (
+        ["human_editorial_review", ("publish_article", {"ai_disclosure": False})],
+        [("publish_article", {"ai_disclosure": False})]),
+    "aiact_art50_3_inform_exposed_persons": (["inform_exposed_persons", "detect_emotion"],
+                                             ["detect_emotion"]),
+    "aiact_art6_classify_before_deployment": (["classify_system", "deploy_system"],
+                                              ["deploy_system"]),
+    "aiact_art27_fria_before_use": (["fria", "enable_use_case"], ["enable_use_case"]),
+    "aiact_art9_risk_review_before_change": (["risk_review", "update_model_version"],
+                                             ["update_model_version"]),
+    "aiact_art14_human_review_per_decision": (["human_review", "apply_decision"],
+                                              ["human_review", "apply_decision",
+                                               "apply_decision"]),
+    "aiact_art14_human_confirms_decision": (["human_review"], ["apply_decision"]),
+    "aiact_art26_11_inform_affected_person": (["inform_affected_person", "apply_decision"],
+                                              ["apply_decision"]),
+    "aiact_art12_log_before_decision": (["log_event", "apply_decision"], ["apply_decision"]),
+    "aiact_art12_log_after_decision": (["apply_decision", "log_event"], ["apply_decision"]),
+    "aiact_art14_automation_cap": (["apply_decision"] * 20, ["apply_decision"] * 21),
+    "aiact_art10_datasheet_before_training": (["edit_dataset", "datasheet", "train_model"],
+                                              ["datasheet", "edit_dataset", "train_model"]),
+    "aiact_art10_bias_examination_before_training": (
+        ["bias_examination", "finetune_model"], ["bias_examination", "edit_dataset",
+                                                 "finetune_model"]),
+    "aiact_art4a_sensitive_data_dedicated_tool": ([("load_dataset", {"category": "sales"})],
+                                                  [("load_dataset", {"category": "health"})]),
+    "aiact_art4a_sensitive_access_approved": (["load_dataset"], ["load_sensitive_data"]),
+    "aiact_art4a_delete_after_use": (["load_sensitive_data", "delete_sensitive_data"],
+                                     ["load_sensitive_data", "train_model"]),
+    "aiact_art53_1c_tdm_optout_checked": (["check_tdm_optout", "crawl"],
+                                          ["check_tdm_optout", "crawl", "crawl"]),
+    "aiact_art53_1d_training_summary": (["training_summary", "release_model"],
+                                        ["release_model"]),
+    "aiact_art53_1a_documentation_up_to_date": (["train_model", "doccheck", "release_model"],
+                                                ["doccheck", "train_model", "release_model"]),
+    "aiact_art55_adversarial_evals": (["finetune_model", "run_adversarial_evals",
+                                       "release_model"],
+                                      ["run_adversarial_evals", "finetune_model",
+                                       "release_model"]),
+    "aiact_art55_incident_reported_to_ai_office": (
+        ["flag_serious_incident", "report_incident_ai_office"], ["flag_serious_incident"]),
+    "aiact_art73_incident_reported": (["flag_serious_incident", "report_serious_incident"],
+                                      ["flag_serious_incident"]),
+    "aiact_art73_report_quickly": (["flag_serious_incident", "report_serious_incident"],
+                                   ["flag_serious_incident"] + ["read_logs"] * 6
+                                   + ["report_serious_incident"]),
+    "aiact_art73_6_preserve_evidence": (["flag_serious_incident", "report_serious_incident",
+                                         "rollback_model"],
+                                        ["flag_serious_incident", "rollback_model"]),
+    "aiact_dev_doccheck_after_last_change": (["edit_code", "doccheck", "deploy_prod"],
+                                             ["doccheck", "edit_code", "deploy_prod"]),
+    "aiact_dev_evals_after_last_change": (["edit_code", "run_evals", "publish_model"],
+                                          ["run_evals", "edit_code", "publish_model"]),
+    "aiact_dev_compliance_register": ([("edit_file", {"path": "src/app.py"})],
+                                      [("edit_file", {"path": "compliance/registre.yaml"})]),
+    "aiact_dev_biometric_libraries": ([("install_package", {"name": "numpy"})],
+                                      [("install_package", {"name": "deepface"})]),
 }
 
 ALL = rulebooks.load(*rulebooks.available())
@@ -140,7 +227,7 @@ def replay(constraint, severity, trace):
 
 def test_bundled_rulebooks():
     assert rulebooks.available() == [
-        "budget", "data_pipeline", "devops", "healthcare", "human_in_the_loop", "payments",
+        "ai_act", "budget", "data_pipeline", "devops", "healthcare", "human_in_the_loop", "payments",
         "privacy", "procurement", "research", "support"]
 
 
@@ -241,6 +328,35 @@ STRICT = [
      [a("transfer_data", region="europe-west1")]),
     # the pipeline order is refused as it happens, not only at the end
     ("pipeline_order", ["fetch_data", "transform"], ["fetch_data", "validate_data", "transform"]),
+    # ai act: one human review covers one decision, of any kind
+    ("aiact_art14_human_review_per_decision",
+     ["human_review", "apply_decision", "reject_application"],
+     ["human_review", "apply_decision", "human_review", "reject_application"]),
+    # each release is marked again; a missing disclosure flag counts as no disclosure
+    ("aiact_art50_2_mark_before_release",
+     ["mark_synthetic_content", "upload_media", "export_asset"],
+     ["mark_synthetic_content", "upload_media", "mark_synthetic_content", "export_asset"]),
+    ("aiact_art50_4_deepfake_disclosed", [a("publish_media")],
+     [a("publish_media", ai_disclosure="yes")]),
+    # the safety check is for THIS generation, not one made earlier
+    ("aiact_art5_safety_check_before_generation",
+     ["content_safety_check", "generate_image", "generate_video"],
+     ["content_safety_check", "generate_image", "content_safety_check", "generate_video"]),
+    # prohibited contexts and sources match any spelling of the prefix
+    ("aiact_art5_1f_no_emotions_work_education",
+     [a("detect_emotion", context="Recruitment interview")],
+     [a("detect_emotion", context="safety")]),
+    ("aiact_art5_1e_no_facial_scraping", [a("build_face_database", source="https://x.org")],
+     [a("build_face_database", source="employee_badges")]),
+    # audit logs and guard files, on Windows paths too
+    ("aiact_art12_audit_logs_intact", [a("delete_file", path=r"C:\app\logs\audit\day.jsonl")],
+     [a("delete_file", path=r"C:\app\logs\debug.log")]),
+    ("aiact_art14_guardrails_untouchable",
+     [a("write_file", path="src/agentltl/rulebooks/ai_act.yaml")],
+     [a("write_file", path="docs/rulebooks.md")]),
+    # evidence is preserved after an incident, whatever the change
+    ("aiact_art73_6_preserve_evidence", ["flag_serious_incident", "delete_model_artifact"],
+     ["update_model_version"]),
 ]
 
 

@@ -1,0 +1,43 @@
+# ─────────────────────────────────────────────────────────────────────
+# AI Act · Module 04 — Données et biais (art. 10 ; art. 4a introduit
+# par l'Omnibus pour le traitement de données sensibles à des fins de
+# détection et de correction des biais)
+# ─────────────────────────────────────────────────────────────────────
+rules:
+  - id: aiact-art10-fiche-donnees
+    before:
+      first: {tool: mcp__aiact__datasheet, with: {dataset: $d}}
+      then:  {tool: ["mcp__*__train_model", "mcp__*__finetune_model"], with: {dataset: $d}}
+    scope: project
+    why: >-
+      Art. 10(2) — origine, finalité de collecte, préparation et hypothèses
+      des données d'entraînement doivent être documentées avant usage.
+
+  - id: aiact-art10-examen-biais
+    before:
+      first: {tool: mcp__aiact__bias_examination, with: {dataset: $d}}
+      then:  {tool: ["mcp__*__train_model", "mcp__*__finetune_model"], with: {dataset: $d}}
+    scope: project
+    why: >-
+      Art. 10(2)(f)-(g) — les jeux de données sont examinés au regard des
+      biais susceptibles d'affecter la santé, la sécurité ou les droits
+      fondamentaux, avant l'entraînement.
+
+  - id: aiact-art4a-donnees-sensibles
+    never:
+      - {tool: ["mcp__*__load_dataset", "mcp__*__query_data"],
+         where: {category: ["health*", "ethnic*", "racial*", "biometric*", "genetic*", "relig*", "politic*", "sexual*", "union*"]}}
+    why: >-
+      Art. 4a (Omnibus) et RGPD art. 9 — les catégories particulières de
+      données ne sont traitées que pour détecter ou corriger des biais, avec
+      garanties ; chaque accès est approuvé par un humain.
+    mode: ask
+
+  - id: aiact-art4a-suppression-apres-usage
+    finally:
+      call:  {tool: "mcp__*__delete_dataset", where: {category: ["health*", "ethnic*", "racial*", "biometric*", "genetic*", "relig*", "politic*", "sexual*", "union*"]}}
+      since: {tool: "mcp__*__load_dataset",   where: {category: ["health*", "ethnic*", "racial*", "biometric*", "genetic*", "relig*", "politic*", "sexual*", "union*"]}}
+    why: >-
+      Art. 4a (Omnibus) — les données sensibles utilisées pour corriger un
+      biais sont supprimées une fois l'objectif atteint.
+    fix: Supprimez la copie de travail des données sensibles avant de terminer.

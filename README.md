@@ -802,6 +802,7 @@ them as `PERSISTENT_BLOCK`. Caps such as `single_payment` are per run.
 | `healthcare` | patient identity, allergies, interactions and dosage checked before prescribing, physician approval for controlled substances, record updated |
 | `procurement` | conflict-of-interest check, 3 quotes and budget check before award, one award, gifts registered |
 | `human_in_the_loop` | user confirms each email, post, external share and account deletion just before it |
+| `ai_act` | EU AI Act: art. 5 prohibited practices refused, art. 50 disclosure and synthetic-content marking, classification and FRIA before deployment, a human review, notice and log for each decision, training data documented and examined for bias, GPAI documentation and evals after the last training, serious incidents reported quickly with evidence preserved (French source and analysis in `examples/ai_act/`) |
 
 ---
 

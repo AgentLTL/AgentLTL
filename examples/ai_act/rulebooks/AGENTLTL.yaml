@@ -1,0 +1,699 @@
+# AI Act × AgentLTL — modules 00 à 07 fusionnés (version commentée : fichiers 0X-*.yaml)
+settings:
+  mode: block
+  retries: 3
+  retry_counting: cumulative
+  report: 3
+  finish_retries: 2
+  unparseable:
+    interactive: ask
+    auto: deny
+  announce: true
+  scope: session
+  scan_output: true
+use:
+- theme-human-in-the-loop
+- theme-data-safety
+- theme-release-safety
+rules:
+- id: aiact-art12-journaux-integres
+  never:
+  - Edit
+  - Write
+  - rm
+  - mv
+  - sed
+  - tee
+  - truncate
+  - shred
+  where:
+    '*':
+    - '**/logs/audit/**'
+    - '**/*.audit.jsonl'
+  why: Art. 12, 19 et 26(6) AI Act — les journaux d'un système à haut risque sont la preuve de son fonctionnement
+    ; ils doivent rester intègres et être conservés (au moins six mois côté déployeur).
+  fix: 'N''écrivez jamais dans les journaux d''audit : ils sont alimentés par la plateforme. Pour tracer
+    une action, appelez l''outil log_event.'
+  mode: stop
+- id: aiact-art14-garde-fous-intouchables
+  never:
+  - Edit
+  - Write
+  - rm
+  - mv
+  - sed
+  - tee
+  where:
+    '*':
+    - '**/AGENTLTL.yaml'
+    - '**/.claude/settings*.json'
+    - '**/.agentltl/**'
+  why: Art. 14 AI Act — le dispositif de contrôle humain ne doit pas pouvoir être désactivé par le système
+    qu'il contrôle.
+  fix: Signalez à l'humain la règle qui vous bloque ; lui seul peut la modifier.
+  mode: stop
+- id: aiact-art14-pas-de-reset-du-garde
+  never:
+    tool: agentltl
+    where:
+      argv:
+      - reset
+      - disable
+      - unuse
+  why: Art. 14 AI Act — effacer la mémoire du garde ou désactiver une règle revient à contourner le contrôle
+    humain.
+  mode: stop
+- id: aiact-art5-1c-notation-sociale
+  never:
+  - mcp__*__social_score
+  - mcp__*__compute_social_score
+  - mcp__*__rank_citizens
+  why: Art. 5(1)(c) — la notation sociale de personnes conduisant à un traitement défavorable est interdite.
+  mode: stop
+- id: aiact-art5-1e-moissonnage-facial
+  never:
+  - tool:
+    - mcp__*__face_index
+    - mcp__*__build_face_database
+    - mcp__*__face_embed_bulk
+    where:
+      source:
+      - web*
+      - http*
+      - crawl*
+      - cctv*
+      - video_surveillance*
+  why: Art. 5(1)(e) — constituer ou étendre une base de reconnaissance faciale par moissonnage non ciblé
+    d'images d'internet ou de vidéosurveillance est interdit.
+  mode: stop
+- id: aiact-art5-1f-contexte-declare
+  require:
+    tool:
+    - mcp__*__emotion_recognition
+    - mcp__*__detect_emotion
+    where:
+      context: ?*
+  why: Art. 5(1)(f) — l'interdiction dépend du contexte d'usage ; tout appel de reconnaissance d'émotions
+    doit déclarer son contexte.
+  fix: Ajoutez l'argument context (ex. medical, safety, marketing...).
+- id: aiact-art5-1f-emotions-travail-education
+  never:
+  - tool:
+    - mcp__*__emotion_recognition
+    - mcp__*__detect_emotion
+    where:
+      context:
+      - workplace
+      - employ*
+      - hr*
+      - recruit*
+      - education
+      - school*
+      - exam*
+      - student*
+  why: Art. 5(1)(f) — inférer les émotions d'une personne sur le lieu de travail ou dans l'enseignement
+    est interdit (hors raisons médicales ou de sécurité, qui relèvent d'une décision humaine documentée).
+  mode: stop
+- id: aiact-art5-1g-categorisation-biometrique
+  never:
+  - tool:
+    - mcp__*__biometric_categorize
+    - mcp__*__infer_attributes_from_face
+    where:
+      attribute:
+      - race*
+      - ethnic*
+      - politic*
+      - union*
+      - relig*
+      - belief*
+      - philosoph*
+      - sex_life*
+      - sexual_orient*
+  why: Art. 5(1)(g) — déduire de données biométriques l'origine, les opinions, l'appartenance syndicale,
+    les convictions ou l'orientation sexuelle est interdit.
+  mode: stop
+- id: aiact-art5-1h-identification-temps-reel
+  never:
+    tool: mcp__*__remote_biometric_identify
+    with:
+      realtime: true
+  why: 'Art. 5(1)(h) — l''identification biométrique à distance en temps réel dans l''espace public est
+    interdite, sauf exceptions répressives soumises à autorisation judiciaire : jamais à l''initiative
+    d''un agent.'
+  mode: stop
+- id: aiact-art5-1d-prediction-penale-profilage
+  never:
+  - tool:
+    - mcp__*__predict_offence_risk
+    - mcp__*__crime_risk_score
+    where:
+      basis:
+      - profil*
+      - personality*
+      - traits*
+  why: Art. 5(1)(d) — évaluer le risque qu'une personne commette une infraction sur la seule base de son
+    profilage ou de ses traits de personnalité est interdit.
+  mode: stop
+- id: aiact-art5-ncii-csam-controle-prealable
+  before:
+    first:
+      tool: mcp__aiact__content_safety_check
+      with:
+        request_id: $r
+    then:
+      tool:
+      - mcp__*__generate_image
+      - mcp__*__generate_video
+      - mcp__*__edit_image
+      - mcp__*__edit_video
+      with:
+        request_id: $r
+  why: Art. 5 (ajout Omnibus, applicable le 2 décembre 2026) — générer des contenus intimes non consentis
+    ou des contenus pédopornographiques est interdit ; chaque demande de génération passe d'abord par
+    le contrôle de sécurité.
+  fix: Appelez mcp__aiact__content_safety_check avec le même request_id, puis générez.
+  mode: stop
+- id: aiact-art50-1-divulgation-ia
+  before:
+    first:
+      tool: mcp__aiact__disclose_ai_interaction
+      with:
+        recipient: $r
+    then:
+    - tool:
+      - mcp__*__send_message
+      - mcp__*__post_reply
+      - mcp__*__start_call
+      with:
+        recipient: $r
+  scope: project
+  why: Art. 50(1) — une personne qui interagit avec un système d'IA doit en être informée au plus tard
+    lors de la première interaction.
+  fix: Appelez mcp__aiact__disclose_ai_interaction pour ce destinataire, puis envoyez.
+- id: aiact-art50-2-marquage-avant-diffusion
+  before:
+    first:
+      tool: mcp__aiact__mark_synthetic_content
+      with:
+        asset_id: $a
+    then:
+      tool:
+      - mcp__*__publish_content
+      - mcp__*__export_asset
+      - mcp__*__upload_media
+      with:
+        asset_id: $a
+  scope: project
+  why: Art. 50(2) — les contenus audio, image, vidéo et texte générés doivent porter un marquage lisible
+    par machine qui permet de détecter leur origine artificielle.
+  fix: Appelez mcp__aiact__mark_synthetic_content sur cet asset_id, puis diffusez.
+- id: aiact-art50-4-hypertrucage-etiquete
+  require:
+    tool: mcp__*__publish_media
+    with:
+      ai_disclosure: true
+  why: Art. 50(4) — un hypertrucage (image, audio, vidéo réalistes générés ou manipulés) doit être signalé
+    comme tel au public.
+  fix: Republiez avec ai_disclosure=true (mention visible « généré par IA »).
+  mode: ask
+- id: aiact-art50-4-texte-interet-public
+  before:
+    first:
+      tool: mcp__aiact__human_editorial_review
+      with:
+        doc_id: $d
+    then:
+      tool: mcp__*__publish_article
+      with:
+        doc_id: $d
+        ai_disclosure: false
+  scope: project
+  why: Art. 50(4) — un texte généré publié pour informer le public sur des questions d'intérêt public
+    doit être signalé comme généré, sauf s'il a fait l'objet d'une revue éditoriale humaine sous responsabilité
+    éditoriale.
+  fix: Publiez avec ai_disclosure=true, ou faites d'abord valider le texte par mcp__aiact__human_editorial_review.
+- id: aiact-art50-3-information-personnes-exposees
+  before:
+    first:
+      tool: mcp__aiact__inform_exposed_persons
+      with:
+        session_id: $s
+    then:
+      tool:
+      - mcp__*__emotion_recognition
+      - mcp__*__detect_emotion
+      - mcp__*__biometric_categorize
+      with:
+        session_id: $s
+  scope: project
+  why: Art. 50(3) — les personnes exposées à un système de reconnaissance des émotions ou de catégorisation
+    biométrique doivent en être informées.
+- id: aiact-art6-classification-prealable
+  before:
+    first:
+      tool: mcp__aiact__classify
+      with:
+        system: $s
+    then:
+    - tool: mcp__*__deploy_system
+      with:
+        system: $s
+    - tool: mcp__*__enable_use_case
+      with:
+        system: $s
+  scope: project
+  why: 'Art. 6 et annexe III — on ne met pas en service un cas d''usage sans avoir déterminé s''il est
+    à haut risque : toutes les autres obligations en découlent.'
+  fix: Lancez mcp__aiact__classify pour ce système, puis redemandez le déploiement.
+- id: aiact-art27-fria-prealable
+  before:
+    first:
+      tool: mcp__aiact__fria
+      with:
+        system: $s
+    then:
+      tool: mcp__*__enable_use_case
+      with:
+        system: $s
+  scope: project
+  why: Art. 27 — certains déployeurs (organismes publics, services publics, crédit et assurance-vie/santé)
+    doivent réaliser une analyse d'impact sur les droits fondamentaux avant la première utilisation.
+  fix: Réalisez mcp__aiact__fria (elle peut s'appuyer sur l'AIPD RGPD).
+- id: aiact-art9-revue-risques-avant-changement
+  before:
+    first:
+      tool: mcp__aiact__risk_review
+      with:
+        system: $s
+    then:
+      tool:
+      - mcp__*__update_model_version
+      - mcp__*__change_prompt_policy
+      with:
+        system: $s
+  scope: project
+  why: 'Art. 9 — le système de gestion des risques couvre tout le cycle de vie : un changement de modèle
+    ou de politique se fait après revue des risques.'
+- id: aiact-art14-revue-humaine-par-dossier
+  before:
+    first:
+      tool: mcp__aiact__human_review
+      with:
+        case_id: $c
+    then:
+      tool:
+      - mcp__*__apply_decision
+      - mcp__*__notify_decision
+      - mcp__*__reject_application
+      - mcp__*__terminate_contract
+      with:
+        case_id: $c
+  scope: project
+  why: Art. 14 et art. 26(2) — une décision produisant des effets sur une personne est soumise à un contrôle
+    humain effectif, dossier par dossier ; la recommandation de l'IA ne vaut pas décision.
+  fix: Soumettez le dossier via mcp__aiact__human_review et attendez sa validation.
+- id: aiact-art14-confirmation-humaine
+  never:
+  - mcp__*__apply_decision
+  - mcp__*__reject_application
+  - mcp__*__terminate_contract
+  why: Art. 14(4) — l'humain doit pouvoir décider de ne pas suivre le système et l'interrompre ; chaque
+    décision conséquente lui est présentée.
+  mode: ask
+- id: aiact-art26-11-information-personne
+  before:
+    first:
+      tool: mcp__aiact__inform_affected_person
+      with:
+        person_id: $p
+    then:
+      tool: mcp__*__apply_decision
+      with:
+        person_id: $p
+  scope: project
+  why: Art. 26(11) et art. 86 — la personne concernée par une décision fondée sur un système à haut risque
+    doit être informée de son utilisation, et peut obtenir une explication.
+- id: aiact-art12-trace-par-decision
+  before:
+    first:
+      tool: mcp__aiact__log_event
+      with:
+        case_id: $c
+    then:
+      tool: mcp__*__apply_decision
+      with:
+        case_id: $c
+  why: Art. 12 — la journalisation doit permettre de retracer chaque décision (données d'entrée, recommandation,
+    vérificateur humain).
+- id: aiact-art12-trace-de-cloture
+  finally:
+    call: mcp__aiact__log_event
+    since:
+    - mcp__*__apply_decision
+    - mcp__*__notify_decision
+  why: Art. 12 — le résultat final de chaque décision doit être journalisé avant de rendre la main.
+  fix: Appelez mcp__aiact__log_event avec le résultat de la dernière décision.
+- id: aiact-art14-plafond-automatisation
+  at_most:
+    call: mcp__*__apply_decision
+    times: 20
+  why: 'Art. 14(4)(b) — prévenir le biais d''automatisation : au-delà de 20 décisions dans une session,
+    un humain vérifie la série.'
+  mode: ask
+- id: aiact-art10-fiche-donnees
+  before:
+    first:
+      tool: mcp__aiact__datasheet
+      with:
+        dataset: $d
+    then:
+      tool:
+      - mcp__*__train_model
+      - mcp__*__finetune_model
+      with:
+        dataset: $d
+  scope: project
+  why: Art. 10(2) — origine, finalité de collecte, préparation et hypothèses des données d'entraînement
+    doivent être documentées avant usage.
+- id: aiact-art10-examen-biais
+  before:
+    first:
+      tool: mcp__aiact__bias_examination
+      with:
+        dataset: $d
+    then:
+      tool:
+      - mcp__*__train_model
+      - mcp__*__finetune_model
+      with:
+        dataset: $d
+  scope: project
+  why: Art. 10(2)(f)-(g) — les jeux de données sont examinés au regard des biais susceptibles d'affecter
+    la santé, la sécurité ou les droits fondamentaux, avant l'entraînement.
+- id: aiact-art4a-donnees-sensibles
+  never:
+  - tool:
+    - mcp__*__load_dataset
+    - mcp__*__query_data
+    where:
+      category:
+      - health*
+      - ethnic*
+      - racial*
+      - biometric*
+      - genetic*
+      - relig*
+      - politic*
+      - sexual*
+      - union*
+  why: Art. 4a (Omnibus) et RGPD art. 9 — les catégories particulières de données ne sont traitées que
+    pour détecter ou corriger des biais, avec garanties ; chaque accès est approuvé par un humain.
+  mode: ask
+- id: aiact-art4a-suppression-apres-usage
+  finally:
+    call:
+      tool: mcp__*__delete_dataset
+      where:
+        category:
+        - health*
+        - ethnic*
+        - racial*
+        - biometric*
+        - genetic*
+        - relig*
+        - politic*
+        - sexual*
+        - union*
+    since:
+      tool: mcp__*__load_dataset
+      where:
+        category:
+        - health*
+        - ethnic*
+        - racial*
+        - biometric*
+        - genetic*
+        - relig*
+        - politic*
+        - sexual*
+        - union*
+  why: Art. 4a (Omnibus) — les données sensibles utilisées pour corriger un biais sont supprimées une
+    fois l'objectif atteint.
+  fix: Supprimez la copie de travail des données sensibles avant de terminer.
+- id: aiact-art53-1c-respect-optout-tdm
+  before:
+    first:
+      tool: mcp__aiact__check_tdm_optout
+      with:
+        domain: $d
+    then:
+      tool:
+      - mcp__*__crawl
+      - mcp__*__fetch_for_training
+      with:
+        domain: $d
+  scope: project
+  why: Art. 53(1)(c) et directive (UE) 2019/790 art. 4(3) — la politique droit d'auteur du fournisseur
+    doit respecter les réserves de droits (opt-out) exprimées par les titulaires.
+  fix: Vérifiez l'opt-out du domaine (robots.txt, TDMRep, métadonnées) avant de collecter.
+- id: aiact-art53-1d-resume-donnees
+  before:
+  - tool: mcp__aiact__training_summary
+    succeeded: true
+  - mcp__*__release_model
+  scope: project
+  why: Art. 53(1)(d) — un résumé suffisamment détaillé du contenu d'entraînement, selon le modèle de l'AI
+    Office, est publié avec le modèle.
+- id: aiact-art53-1a-documentation-a-jour
+  before:
+    first:
+      tool: mcp__aiact__doccheck
+      succeeded: true
+    then: mcp__*__release_model
+    since:
+    - mcp__*__train_model
+    - mcp__*__finetune_model
+  why: Art. 53(1)(a)-(b) — la documentation technique et l'information des fournisseurs en aval doivent
+    décrire le modèle effectivement publié.
+  fix: Mettez à jour la documentation et relancez mcp__aiact__doccheck après le dernier entraînement.
+- id: aiact-art55-evaluations-adversariales
+  before:
+    first:
+      tool: mcp__aiact__run_adversarial_evals
+      succeeded: true
+    then: mcp__*__release_model
+    since:
+    - mcp__*__train_model
+    - mcp__*__finetune_model
+  why: Art. 55(1)(a) — un modèle à risque systémique est évalué, y compris par des tests adversariaux,
+    sur la version qui sera publiée.
+- id: aiact-art55-signalement-incident
+  finally:
+    call: mcp__aiact__report_incident
+    since: mcp__aiact__flag_serious_incident
+  why: Art. 55(1)(c) — les incidents graves sont suivis, documentés et signalés sans retard injustifié
+    à l'AI Office.
+- id: aiact-art73-signalement-avant-cloture
+  finally:
+    call: mcp__aiact__report_serious_incident
+    since: mcp__aiact__flag_serious_incident
+  why: Art. 73 — un incident grave est notifié à l'autorité de surveillance (au plus tard 15 jours, 10
+    jours en cas de décès, 2 jours en cas d'atteinte généralisée ou d'infrastructure critique).
+  fix: Appelez mcp__aiact__report_serious_incident (il prévient le responsable conformité).
+- id: aiact-art73-signalement-rapide
+  ltl: within_steps("mcp__aiact__flag_serious_incident", "mcp__aiact__report_serious_incident", 5)
+  why: 'Art. 73 — le signalement passe avant toute autre action : au plus cinq appels d''outil entre la
+    détection et le signalement.'
+- id: aiact-art73-6-preservation-preuves
+  ltl: G((now("mcp__mlops__rollback_model") | now("mcp__mlops__update_model_version") | now("mcp__mlops__delete_model_artifact"))
+    -> (((!now("mcp__aiact__flag_serious_incident")) S now("mcp__aiact__report_serious_incident")) | H(!now("mcp__aiact__flag_serious_incident"))))
+  scope: project
+  why: Art. 73(6) — après un incident grave, on ne modifie pas le système d'une manière qui fausserait
+    l'enquête avant d'en avoir informé l'autorité.
+  fix: Signalez d'abord l'incident (mcp__aiact__report_serious_incident).
+  mode: stop
+- id: aiact-dev-classification-avant-prod
+  before:
+    first:
+      tool: aiact_classify
+      with:
+        system: $s
+    then:
+      tool: helm_upgrade
+      with:
+        release: $s
+        namespace: prod
+  scope: project
+  why: Art. 6 — un système ne part pas en production sans classification de risque enregistrée pour ce
+    même système.
+  fix: Lancez `aiact classify --system <release>` puis redéployez.
+- id: aiact-dev-doc-technique-a-jour
+  before:
+    first:
+      tool: aiact_doccheck
+      succeeded: true
+    then:
+      tool: helm_upgrade
+      with:
+        namespace: prod
+    since:
+      tool:
+      - Edit
+      - Write
+      where:
+        file_path:
+        - src/**
+        - models/**
+        - prompts/**
+  why: Art. 11 et annexe IV — la documentation technique décrit la version déployée ; tout changement
+    de code, de modèle ou de prompt la rend obsolète.
+  fix: Mettez à jour docs/annexe-iv puis lancez `aiact doccheck` (il doit réussir).
+- id: aiact-dev-evaluations-avant-publication
+  before:
+    first:
+      tool: aiact_evals
+      succeeded: true
+    then:
+    - tool: helm_upgrade
+      with:
+        namespace: prod
+    - tool: huggingface-cli
+      with:
+        argv: upload
+    - tool: hf
+      with:
+        argv: upload
+    since:
+      tool:
+      - Edit
+      - Write
+      where:
+        file_path:
+        - src/**
+        - models/**
+        - prompts/**
+  why: Art. 15 — exactitude, robustesse et cybersécurité sont mesurées sur la version publiée (suite d'évaluation,
+    biais, red-teaming).
+  fix: Lancez `aiact evals` après votre dernière modification.
+- id: aiact-dev-fiche-donnees-avant-entrainement
+  before:
+    first:
+      tool: aiact_datasheet
+      succeeded: true
+    then:
+      tool:
+      - python
+      - python3
+      where:
+        script:
+        - train*.py
+        - '**/train*.py'
+        - finetune*.py
+        - '**/finetune*.py'
+    since:
+      tool:
+      - Edit
+      - Write
+      where:
+        file_path:
+        - data/**
+        - datasets/**
+  why: Art. 10 — les données d'entraînement modifiées sont documentées avant tout entraînement.
+- id: aiact-dev-registre-conformite
+  never:
+  - Edit
+  - Write
+  - rm
+  - mv
+  - sed
+  - tee
+  where:
+    '*':
+    - compliance/**
+    - docs/annexe-iv/**
+  why: Art. 11, 17 et 18 — le registre de classification, la FRIA et la documentation technique sont des
+    pièces du système de gestion de la qualité ; leur modification est validée par un humain.
+  mode: ask
+- id: aiact-dev-bibliotheques-biometriques
+  never:
+  - tool: pip_install
+    where:
+      '*':
+      - deepface*
+      - face_recognition*
+      - fer
+      - fer==*
+      - insightface*
+      - py-feat*
+      - hsemotion*
+  - tool:
+    - npm
+    - yarn
+    - pnpm
+    where:
+      argv:
+      - face-api*
+      - '@vladmandic/face-api*'
+      - '@vladmandic/human*'
+  why: Art. 5(1)(e)-(g) et annexe III(1) — la biométrie et la reconnaissance d'émotions sont interdites
+    ou à haut risque selon le contexte ; leur introduction dans le code est une décision humaine.
+  mode: ask
+- id: aiact-dev-tests-transparence
+  finally:
+    call:
+      tool: pytest
+      succeeded: true
+    since:
+      tool:
+      - Edit
+      - Write
+      where:
+        file_path:
+        - '**/*disclos*'
+        - '**/*watermark*'
+        - '**/*marking*'
+        - '**/*c2pa*'
+  why: 'Art. 50 — le code de divulgation et de marquage est une obligation légale : on ne rend pas la
+    main sans que ses tests passent.'
+  fix: Lancez pytest et corrigez jusqu'au vert.
+tools:
+  aiact:
+    subcommands:
+      classify:
+        options:
+        - flags:
+          - --system
+      fria:
+        options:
+        - flags:
+          - --system
+      doccheck:
+        options:
+        - flags:
+          - --system
+      evals:
+        options:
+        - flags:
+          - --system
+        - flags:
+          - --suite
+      datasheet:
+        options:
+        - flags:
+          - --dataset
+      mark:
+        options:
+        - flags:
+          - --asset
+  helm:
+    options:
+    - flags:
+      - -n
+      - --namespace
+      global: true
+    subcommands:
+      upgrade:
+        positionals:
+        - name: release
+        - name: chart
