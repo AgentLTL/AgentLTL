@@ -227,7 +227,8 @@ def replay(constraint, severity, trace):
 
 def test_bundled_rulebooks():
     assert rulebooks.available() == [
-        "ai_act", "budget", "data_pipeline", "devops", "healthcare", "human_in_the_loop", "payments",
+        "ai_act", "budget", "data_pipeline", "devops", "healthcare", "human_in_the_loop",
+        "payments",
         "privacy", "procurement", "research", "support"]
 
 
