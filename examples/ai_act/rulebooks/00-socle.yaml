@@ -1,0 +1,51 @@
+# ─────────────────────────────────────────────────────────────────────
+# AI Act · Module 00 — Socle commun (à inclure dans tous les projets)
+# Couvre : art. 12, 19, 26(6) (journaux), art. 14 (contrôle humain,
+# intégrité du dispositif de contrôle), art. 4 (maîtrise de l'IA : les
+# rules sont annoncées à l'agent avec leur justification).
+# ─────────────────────────────────────────────────────────────────────
+settings:
+  mode: block                 # par défaut : refus systématique
+  retries: 3
+  retry_counting: cumulative
+  report: 3
+  finish_retries: 2
+  unparseable:                # une commande non analysable n'est pas contrôlable
+    interactive: ask          # → l'humain décide
+    auto: deny                # → en mode autonome, refus
+  announce: true              # rappel des règles au démarrage et après compaction
+  scope: session
+  scan_output: true           # alerte si une sortie contient un secret
+
+use:                          # règles packagées de la bibliothèque AgentLTL
+  - theme-human-in-the-loop   # publier, envoyer, supprimer à distance → humain
+  - theme-data-safety         # secrets, exfiltration de fichiers de données
+
+rules:
+  - id: aiact-art12-journaux-integres
+    never: [Edit, Write, rm, mv, sed, tee, truncate, shred]
+    where: {"*": ["**/logs/audit/**", "**/*.audit.jsonl"]}
+    why: >-
+      Art. 12, 19 et 26(6) AI Act — les journaux d'un système à haut risque
+      sont la preuve de son fonctionnement ; ils doivent rester intègres et
+      être conservés (au moins six mois côté déployeur).
+    fix: >-
+      N'écrivez jamais dans les journaux d'audit : ils sont alimentés par la
+      plateforme. Pour tracer une action, appelez l'outil log_event.
+    mode: stop
+
+  - id: aiact-art14-garde-fous-intouchables
+    never: [Edit, Write, rm, mv, sed, tee]
+    where: {"*": ["**/AGENTLTL.yaml", "**/.claude/settings*.json", "**/.agentltl/**"]}
+    why: >-
+      Art. 14 AI Act — le dispositif de contrôle humain ne doit pas pouvoir
+      être désactivé par le système qu'il contrôle.
+    fix: Signalez à l'humain la règle qui vous bloque ; lui seul peut la modifier.
+    mode: stop
+
+  - id: aiact-art14-pas-de-reset-du-garde
+    never: {tool: agentltl, where: {argv: [reset, disable, unuse]}}
+    why: >-
+      Art. 14 AI Act — effacer la mémoire du garde ou désactiver une règle
+      revient à contourner le contrôle humain.
+    mode: stop

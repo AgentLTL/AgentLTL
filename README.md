@@ -764,6 +764,23 @@ rule that allows a set of values refuses a call that does not say which one. In 
 `now_with("tool", arg=value)` is the call at this step with those argument values
 (`called_with` is about the whole run).
 
+Two keys go with a formula. `for_each: <argument>` ties every `now(...)` / `now_with(...)`
+of a `G(...)` formula to that argument of the call being judged, through the first-order
+quantifier `ForAll`: the review must be about the same case as the decision. A call
+without the argument is matched only by steps without it. `succeeded: [tools]` counts
+those steps only when they succeeded: a recorded exit status of 0 or none
+(`record_completed(..., status=...)`, or `"status"` in a trace entry), and no result
+`{"ok": false}`.
+
+```yaml
+  - name: review_per_case
+    formula: 'G(now("apply_decision") -> O(now("human_review")))'
+    for_each: case_id          # human_review(case_id=C1) opens apply_decision(case_id=C1) only
+  - name: docs_pass
+    formula: 'G(now("release_model") -> O(now("doccheck")))'
+    succeeded: [doccheck]      # a doccheck that exited 1 does not open the release
+```
+
 `rulebooks.load` takes paths and the names of the bundled rulebooks, and merges them
 (it needs PyYAML: `pip install "agentltl[yaml]"`):
 
@@ -784,9 +801,10 @@ Their blocking rules are written over the past (runtime-SAFE); end-of-run obliga
 
 Each rule does what its description says, and tests hold that: a check gates **every** action
 (a second `prescribe` needs its own `check_allergies`, not the first one's), and argument rules
-catch every spelling (`"true"`, `"PROD"`). Two limits remain, and the rule says so: the language
-cannot tie a call to *which* file, patient or beneficiary an earlier call was about (`read_before_write`
-checks that something was read), and a count such as `three_quotes_before_award` counts calls, not
+catch every spelling (`"true"`, `"PROD"`). Two limits remain, and the rule says so: a rule
+without `for_each` cannot tie a call to *which* file, patient or beneficiary an earlier call
+was about (`read_before_write` checks that something was read; `ai_act` uses `for_each`
+throughout), and a count such as `three_quotes_before_award` counts calls, not
 distinct bidders. Rules with severity `ASK` wait for a person; without one the runtime treats
 them as `PERSISTENT_BLOCK`. Caps such as `single_payment` are per run.
 
@@ -802,6 +820,7 @@ them as `PERSISTENT_BLOCK`. Caps such as `single_payment` are per run.
 | `healthcare` | patient identity, allergies, interactions and dosage checked before prescribing, physician approval for controlled substances, record updated |
 | `procurement` | conflict-of-interest check, 3 quotes and budget check before award, one award, gifts registered |
 | `human_in_the_loop` | user confirms each email, post, external share and account deletion just before it |
+| `ai_act` | EU AI Act, case by case (`for_each`): art. 5 prohibited practices refused (any spelling, undeclared context or source refused too), art. 50 disclosure per recipient and marking per asset, classification, conformity assessment, EU registration, FRIA and worker information before deployment, a human review, notice and log for each decision, explanations answered, datasets documented and examined for bias, GPAI opt-outs per domain and passing documentation and evals after the last training, serious incidents reported quickly with evidence preserved (French source and analysis in `examples/ai_act/`) |
 
 ---
 

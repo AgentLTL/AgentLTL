@@ -1,0 +1,513 @@
+# AgentLTL rulebook: EU AI Act (Regulation (EU) 2024/1689, as amended by the 2026 digital
+# omnibus on AI, Regulation (EU) 2026/1744).
+#
+# For agents that build, deploy or operate AI systems, or that act on people through one.
+# Each rule turns an obligation of the Act into a precondition checked before every tool
+# call. No rulebook makes a system compliant on its own: the classification, the substance
+# of a human review and the quality management system stay human work. What these rules
+# guarantee is that an agent cannot skip a compliance step, and that each refusal is
+# traced. This is not legal advice.
+#
+# Tool names are placeholders: rename them to yours. The compliance steps are
+# classify_system, conformity_assessment, register_eu_database, fria,
+# inform_worker_representatives, risk_review, human_review, inform_affected_person,
+# provide_explanation, log_event, disclose_ai_interaction, mark_synthetic_content,
+# human_editorial_review, inform_exposed_persons, content_safety_check, datasheet,
+# bias_examination, check_tdm_optout, training_summary, doccheck, run_adversarial_evals,
+# run_evals, flag_serious_incident, report_serious_incident, report_incident_ai_office,
+# load_sensitive_data, delete_sensitive_data.
+#
+# for_each: <argument> ties the steps to the same case, person, asset or system as the
+# action they gate (a review of case C2 does not open a decision on case C1). A call
+# without that argument is matched only by steps without it, so name your entities.
+# succeeded: [tools] counts a step only when it succeeded (exit status 0 or none, and no
+# result with ok: false): a failing doccheck does not open the release.
+#
+# The French source of these rules (one file per module) and an analysis of the Act are
+# in examples/ai_act/.
+#
+# Y = the call just before; (!now("x")) S now("y") = y happened since the last x;
+# O = at some point before (or now); H = always before (or now).
+
+name: ai_act
+description: 'EU AI Act (Regulation (EU) 2024/1689) obligations as tool-call preconditions.'
+
+rules:
+  # ── Module 00 · common base ─────────────────────────────────────────────
+
+  # Art. 12, 19 and 26(6): the logs of a high-risk system are the evidence of how it ran;
+  # they stay intact and are kept (at least six months on the deployer side).
+  - name: aiact_art12_audit_logs_intact
+    never:
+      tool: [edit_file, write_file, delete_file, move_file]
+      where: {path: {matches: '(^|[/\\])logs[/\\]audit([/\\]|$)|\.audit\.jsonl$'}}
+    severity: HARD_STOP
+    weight: 3
+    description: 'The agent never writes to, moves or deletes the audit logs.'
+    repair: 'Never write to the audit logs: the platform feeds them. Call log_event to trace an action.'
+
+  # Art. 14: human oversight cannot be switched off by the system it oversees.
+  - name: aiact_art14_guardrails_untouchable
+    never:
+      tool: [edit_file, write_file, delete_file, move_file]
+      where: {path: {matches: '(^|[/\\])(AGENTLTL\.yaml|\.agentltl[/\\].*|\.claude[/\\]settings[^/\\]*\.json|rulebooks[/\\][^/\\]+\.ya?ml)$'}}
+    severity: HARD_STOP
+    weight: 3
+    description: 'The agent never edits its own rules or guard settings.'
+    repair: 'Tell the human which rule blocks you; only they may change it.'
+
+  # ── Module 01 · prohibited practices (art. 5) ───────────────────────────
+  # Art. 5(1)(a)-(b) (manipulation, exploiting vulnerabilities) are about the content of
+  # what the agent says: no tool call shows them, so they are left to content classifiers.
+
+  # Art. 5(1)(c): social scoring leading to detrimental or disproportionate treatment.
+  - name: aiact_art5_1c_no_social_scoring
+    never: {tool: [social_score, compute_social_score, rank_citizens]}
+    severity: HARD_STOP
+    weight: 3
+    description: 'No social scoring of people, ever.'
+    repair: 'Social scoring is prohibited (art. 5(1)(c)); stop and tell the human.'
+
+  # Art. 5(1)(d): predicting that a person will offend from profiling or personality traits
+  # alone. Only an assessment that supports a human one, on objective and verifiable facts
+  # linked to a criminal activity, is allowed; a call that does not say so is refused.
+  - name: aiact_art5_1d_no_profiling_crime_prediction
+    never:
+      tool: [predict_offence_risk, crime_risk_score]
+      where: {basis: {not_matches: '^(objective|verifiable)[_ -]?facts?$'}}
+    severity: HARD_STOP
+    weight: 3
+    description: 'Offence-risk assessment only on objective, verifiable facts, never on profiling.'
+    repair: 'Assessing offence risk from profiling or personality is prohibited (art. 5(1)(d)).'
+
+  # Art. 5(1)(e): untargeted scraping of facial images from the internet or CCTV.
+  - name: aiact_art5_1e_no_facial_scraping
+    never:
+      tool: [face_index, build_face_database, face_embed_bulk]
+      where: {source: {matches: '(^|[^a-z0-9])(web|www|https?|internet|crawl|scrap|social|cctv|video_?surveillance|camera)'}}
+    severity: HARD_STOP
+    weight: 3
+    description: 'No face database built from web, social media or CCTV scraping.'
+    repair: 'Untargeted facial scraping is prohibited (art. 5(1)(e)); use a lawful, targeted source.'
+
+  # The scraping rule needs to know the source: a call that does not state it is refused.
+  - name: aiact_art5_1e_face_source_declared
+    never:
+      tool: [face_index, build_face_database, face_embed_bulk]
+      where: {source: {present: false}}
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'Every face indexing call states where the images come from.'
+    repair: 'Add the source argument (for example consented_enrolment).'
+
+  # Art. 5(1)(f): whether emotion recognition is prohibited depends on the context of use,
+  # so every call states it.
+  - name: aiact_art5_1f_emotion_context_declared
+    never:
+      tool: [emotion_recognition, detect_emotion]
+      where: {context: {present: false}}
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'Every emotion recognition call declares its context of use.'
+    repair: 'Add the context argument (for example medical, safety, marketing).'
+
+  # Art. 5(1)(f): no emotion inference at work or in education. The medical and safety
+  # exceptions are a documented human decision, not the agent's.
+  - name: aiact_art5_1f_no_emotions_work_education
+    never:
+      tool: [emotion_recognition, detect_emotion]
+      where: {context: {matches: '(^|[^a-z0-9])(work|office|employ|staff|hr($|[^a-z])|human_?resources|recruit|hiring|interview|educat|school|class(room)?($|[^a-z])|universit|campus|exams?($|[^a-z])|student|pupil)'}}
+    severity: HARD_STOP
+    weight: 3
+    description: 'No emotion recognition at the workplace or in education.'
+    repair: 'Emotion recognition at work or school is prohibited (art. 5(1)(f)); a medical or safety exception is for a human to decide.'
+
+  # Art. 5(1)(g): inferring race, political opinions, union membership, religious or
+  # philosophical beliefs, sex life or sexual orientation from biometric data.
+  - name: aiact_art5_1g_no_biometric_categorisation
+    never:
+      tool: [biometric_categorize, infer_attributes_from_face]
+      where: {attribute: {matches: '(^|[^a-z0-9])(race|racial|ethnic|politic|trade_?union|union($|[^a-z])|relig|belief|philosoph|sex_?life|sexual)'}}
+    severity: HARD_STOP
+    weight: 3
+    description: 'No biometric inference of sensitive attributes.'
+    repair: 'Biometric categorisation by sensitive attribute is prohibited (art. 5(1)(g)).'
+
+  # Art. 5(1)(h): real-time remote biometric identification in public spaces. The law
+  # enforcement exceptions need a prior judicial authorisation: never on an agent's
+  # initiative. A call that does not say it is post-event (realtime=false) is refused.
+  - name: aiact_art5_1h_no_realtime_remote_identification
+    never: {tool: remote_biometric_identify, where: {realtime: {not_in: [false]}}}
+    severity: HARD_STOP
+    weight: 3
+    description: 'No real-time remote biometric identification.'
+    repair: 'Real-time remote biometric identification is prohibited (art. 5(1)(h)); post-event use states realtime=false.'
+
+  # Art. 5 (omnibus addition, applicable 2 December 2026): non-consensual intimate content
+  # and child sexual abuse material. Each generation request passes the safety check.
+  - name: aiact_art5_safety_check_before_generation
+    formula: 'G((now("generate_image") | now("generate_video") | now("edit_image") | now("edit_video")) -> O(now("content_safety_check")))'
+    for_each: request_id
+    succeeded: [content_safety_check]
+    severity: HARD_STOP
+    weight: 3
+    description: 'Each image or video request passes its own content safety check before generation.'
+    repair: 'Call content_safety_check with this request_id, then generate.'
+
+  # ── Module 02 · transparency (art. 50, applicable 2 August 2026) ────────
+
+  # Art. 50(1): a person is told they are dealing with an AI system, at the latest at the
+  # first interaction.
+  - name: aiact_art50_1_disclose_ai_interaction
+    formula: 'G((now("send_message") | now("post_reply") | now("start_call")) -> O(now("disclose_ai_interaction")))'
+    for_each: recipient
+    severity: PERSISTENT_BLOCK
+    weight: 3
+    description: 'No message or call to a person before they are told they deal with an AI.'
+    repair: 'Call disclose_ai_interaction for this recipient, then send.'
+
+  # Art. 50(2): generated audio, image, video and text carry a machine-readable marking.
+  - name: aiact_art50_2_mark_before_release
+    formula: 'G((now("publish_content") | now("export_asset") | now("upload_media")) -> O(now("mark_synthetic_content")))'
+    for_each: asset_id
+    succeeded: [mark_synthetic_content]
+    severity: PERSISTENT_BLOCK
+    weight: 3
+    description: 'Each generated asset is marked as synthetic before it leaves the system.'
+    repair: 'Call mark_synthetic_content on this asset_id, then release it.'
+
+  # Art. 50(4): a deepfake is disclosed as such (a missing ai_disclosure counts as none).
+  - name: aiact_art50_4_deepfake_disclosed
+    never: {tool: publish_media, where: {ai_disclosure: {not_in: [true]}}}
+    severity: ASK
+    weight: 2
+    description: 'Realistic generated media is published with ai_disclosure=true.'
+    repair: 'Publish again with ai_disclosure=true (visible "AI-generated" label).'
+
+  # Art. 50(4): generated text published to inform the public on matters of public
+  # interest is labelled, unless a human reviewed it under editorial responsibility.
+  - name: aiact_art50_4_public_interest_text
+    formula: 'G((now("publish_article") & !now_with("publish_article", ai_disclosure=true)) -> O(now("human_editorial_review")))'
+    for_each: doc_id
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'A generated article goes out labelled, or after a human editorial review of that article.'
+    repair: 'Publish with ai_disclosure=true, or have human_editorial_review approve this doc_id first.'
+
+  # Art. 50(3): people exposed to emotion recognition or biometric categorisation are told.
+  - name: aiact_art50_3_inform_exposed_persons
+    formula: 'G((now("emotion_recognition") | now("detect_emotion") | now("biometric_categorize")) -> O(now("inform_exposed_persons")))'
+    for_each: session_id
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'The people in a session are informed before emotion recognition or biometric categorisation.'
+    repair: 'Call inform_exposed_persons for this session_id first.'
+
+  # ── Module 03 · high-risk systems (annex III from 2 December 2027) ──────
+
+  # Art. 6 and annex III: no system goes live before its risk class is known.
+  - name: aiact_art6_classify_before_deployment
+    formula: 'G((now("deploy_system") | now("enable_use_case") | now("deploy_prod")) -> O(now("classify_system")))'
+    for_each: system
+    succeeded: [classify_system]
+    severity: PERSISTENT_BLOCK
+    weight: 3
+    description: 'A system is classified (high risk or not) before it is deployed.'
+    repair: 'Call classify_system for this system, then deploy it.'
+
+  # Art. 16(f), 43 and 49(1): a high-risk system passes its conformity assessment and is
+  # registered in the EU database before it is placed on the market or put into service.
+  # Only a deployment that states risk_class minimal or limited (as classify_system found)
+  # skips them; an unstated class counts as high.
+  - name: aiact_art43_conformity_before_market
+    formula: 'G((now("deploy_system") & !now_with("deploy_system", risk_class="minimal") & !now_with("deploy_system", risk_class="limited")) -> O(now("conformity_assessment")))'
+    for_each: system
+    succeeded: [conformity_assessment]
+    severity: PERSISTENT_BLOCK
+    weight: 3
+    description: 'A high-risk system passes its conformity assessment before deployment.'
+    repair: 'Complete conformity_assessment for this system, then deploy.'
+
+  - name: aiact_art49_registration_before_market
+    formula: 'G((now("deploy_system") & !now_with("deploy_system", risk_class="minimal") & !now_with("deploy_system", risk_class="limited")) -> O(now("register_eu_database")))'
+    for_each: system
+    succeeded: [register_eu_database]
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'A high-risk system is registered in the EU database before deployment.'
+    repair: 'Call register_eu_database for this system, then deploy.'
+
+  # Art. 27: public bodies, providers of public services, and credit or life and health
+  # insurance deployers assess the impact on fundamental rights before first use.
+  - name: aiact_art27_fria_before_use
+    formula: 'G(now("enable_use_case") -> O(now("fria")))'
+    for_each: system
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'A fundamental rights impact assessment of the system precedes its first use.'
+    repair: 'Run fria for this system (it can build on the GDPR DPIA), then enable the use case.'
+
+  # Art. 26(7): before a high-risk system is used at the workplace, the workers'
+  # representatives and the workers affected are told.
+  - name: aiact_art26_7_inform_workers
+    formula: 'G(now_with("enable_use_case", context="workplace") -> O(now("inform_worker_representatives")))'
+    for_each: system
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: "Workers' representatives are informed before a system is used at the workplace."
+    repair: 'Call inform_worker_representatives for this system, then enable it.'
+
+  # Art. 9: risk management covers the whole life cycle; each change follows its own review.
+  - name: aiact_art9_risk_review_before_change
+    formula: 'G((now("update_model_version") | now("change_prompt_policy")) -> Y((!(now("update_model_version") | now("change_prompt_policy"))) S now("risk_review")))'
+    for_each: system
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'Each model or policy change of a system follows its own risk review.'
+    repair: 'Call risk_review for this system and change, then apply it.'
+
+  # Art. 14 and 26(2): each decision affecting a person gets effective human oversight,
+  # case by case; the AI's recommendation is not the decision. A new decision on the same
+  # case needs a new review.
+  - name: aiact_art14_human_review_per_decision
+    formula: 'G((now("apply_decision") | now("reject_application") | now("terminate_contract")) -> Y((!(now("apply_decision") | now("reject_application") | now("terminate_contract"))) S now("human_review")))'
+    for_each: case_id
+    severity: PERSISTENT_BLOCK
+    weight: 3
+    description: 'Each decision on a case follows a human review of that case.'
+    repair: 'Submit this case_id to human_review and wait for approval.'
+
+  # Art. 14(4): the human can decide not to follow the system; each consequential decision
+  # is put to them when it is applied.
+  - name: aiact_art14_human_confirms_decision
+    formula: 'G(!(now("apply_decision") | now("reject_application") | now("terminate_contract")))'
+    severity: ASK
+    weight: 2
+    description: 'Each consequential decision is confirmed by a human when it is applied.'
+    repair: 'Present the decision to the human; they apply or reject it.'
+
+  # Art. 26(11): the person affected is told a high-risk system is used to decide about them.
+  - name: aiact_art26_11_inform_affected_person
+    formula: 'G((now("apply_decision") | now("reject_application") | now("terminate_contract")) -> O(now("inform_affected_person")))'
+    for_each: person_id
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'The person is informed of the use of the system before a decision about them.'
+    repair: 'Call inform_affected_person for this person_id, then apply the decision.'
+
+  # Art. 86: a person affected by such a decision may ask for an explanation; an
+  # explanation request received during the run is answered before it ends.
+  - name: aiact_art86_explanation_provided
+    formula: 'G(now("explanation_request") -> F(now("provide_explanation")))'
+    for_each: person_id
+    severity: TOLERATE
+    weight: 2
+    description: 'An explanation request is answered for that person before the run ends.'
+    repair: 'Call provide_explanation for the person who asked.'
+    applies_to_final_answer: true
+
+  # Art. 12: logging makes each decision traceable (input, recommendation, reviewer).
+  - name: aiact_art12_log_before_decision
+    formula: 'G((now("apply_decision") | now("reject_application") | now("terminate_contract")) -> Y((!(now("apply_decision") | now("reject_application") | now("terminate_contract"))) S now("log_event")))'
+    for_each: case_id
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'Each decision on a case is logged before it is applied.'
+    repair: 'Call log_event for this case_id, then apply the decision.'
+
+  # Art. 12: the outcome of each decision is logged before the agent hands back.
+  - name: aiact_art12_log_after_decision
+    formula: 'G((now("apply_decision") | now("reject_application") | now("terminate_contract") | now("notify_decision")) -> F(now("log_event")))'
+    for_each: case_id
+    severity: TOLERATE
+    weight: 2
+    description: 'The outcome of each decision is logged for its case before the run ends.'
+    repair: 'Call log_event with the outcome of the last decision on this case_id.'
+    applies_to_final_answer: true
+
+  # Art. 14(4)(b): automation bias. Past 20 decisions in a run, a human checks the batch.
+  - name: aiact_art14_automation_cap
+    formula: 'called_n("apply_decision", <= 20)'
+    severity: ASK
+    weight: 1
+    description: 'At most 20 decisions per run without a human checking the batch.'
+    repair: 'Hand the batch of decisions to a human for review.'
+
+  # ── Module 04 · data (art. 10, 4a) ──────────────────────────────────────
+
+  # Art. 10(2): origin, purpose and preparation of training data are documented, after the
+  # last change to that dataset.
+  - name: aiact_art10_datasheet_before_training
+    formula: 'G((now("train_model") | now("finetune_model")) -> ((!now("edit_dataset")) S now("datasheet")))'
+    for_each: dataset
+    succeeded: [datasheet]
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'A dataset is documented after its last change, before training on it.'
+    repair: 'Call datasheet on this dataset, then train.'
+
+  # Art. 10(2)(f)-(g): datasets are examined for biases before training.
+  - name: aiact_art10_bias_examination_before_training
+    formula: 'G((now("train_model") | now("finetune_model")) -> ((!now("edit_dataset")) S now("bias_examination")))'
+    for_each: dataset
+    succeeded: [bias_examination]
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'A dataset is examined for biases after its last change, before training on it.'
+    repair: 'Call bias_examination on this dataset, then train.'
+
+  # Art. 4a (omnibus) and GDPR art. 9: special categories of personal data are processed
+  # only to detect or correct biases, through the dedicated, approved tool.
+  - name: aiact_art4a_sensitive_data_dedicated_tool
+    never:
+      tool: [load_dataset, query_data]
+      where: {category: {matches: '(^|[^a-z0-9])(health|medical|racial|race|ethnic|biometric|genetic|relig|belief|philosoph|politic|sex_?life|sexual|trade_?union|union($|[^a-z]))'}}
+    severity: PERSISTENT_BLOCK
+    weight: 3
+    description: 'Special categories of data are never loaded through the generic data tools.'
+    repair: 'Use load_sensitive_data, for bias detection or correction only.'
+
+  - name: aiact_art4a_sensitive_access_approved
+    formula: 'G(!now("load_sensitive_data"))'
+    severity: ASK
+    weight: 2
+    description: 'Each access to special categories of data is approved by a human.'
+    repair: 'Ask the human to approve this access, stating the bias it corrects.'
+
+  # Art. 4a (omnibus): sensitive data used to correct a bias is deleted once done.
+  - name: aiact_art4a_delete_after_use
+    formula: 'G(now("load_sensitive_data") -> F(now("delete_sensitive_data")))'
+    for_each: dataset
+    severity: TOLERATE
+    weight: 2
+    description: 'Each sensitive dataset loaded during the run is deleted before it ends.'
+    repair: 'Call delete_sensitive_data on the working copy of this dataset before finishing.'
+    applies_to_final_answer: true
+
+  # ── Module 05 · general-purpose AI models (art. 53, 55) ─────────────────
+
+  # Art. 53(1)(c) and directive (EU) 2019/790 art. 4(3): text-and-data-mining opt-outs of
+  # rights holders are respected, domain by domain.
+  - name: aiact_art53_1c_tdm_optout_checked
+    formula: 'G((now("crawl") | now("fetch_for_training")) -> O(now("check_tdm_optout")))'
+    for_each: domain
+    succeeded: [check_tdm_optout]
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'A domain is collected for training only after its opt-out was checked.'
+    repair: 'Call check_tdm_optout for this domain (robots.txt, TDMRep, metadata), then collect.'
+
+  # Art. 53(1)(d): a summary of the training content (AI Office template) is published.
+  - name: aiact_art53_1d_training_summary
+    formula: 'G(now("release_model") -> O(now("training_summary")))'
+    for_each: model
+    succeeded: [training_summary]
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'A training content summary of the model exists before it is released.'
+    repair: 'Call training_summary for this model (AI Office template), then release.'
+
+  # Art. 53(1)(a)-(b): the technical documentation describes the model actually released.
+  - name: aiact_art53_1a_documentation_up_to_date
+    formula: 'G(now("release_model") -> ((!(now("train_model") | now("finetune_model"))) S now("doccheck")))'
+    for_each: model
+    succeeded: [doccheck]
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'The documentation check passes after the last training, before release.'
+    repair: 'Update the documentation and run doccheck on this model until it passes.'
+
+  # Art. 55(1)(a): a model with systemic risk is evaluated, adversarially too, as released.
+  # Drop this rule for models below the systemic-risk threshold.
+  - name: aiact_art55_adversarial_evals
+    formula: 'G(now("release_model") -> ((!(now("train_model") | now("finetune_model"))) S now("run_adversarial_evals")))'
+    for_each: model
+    succeeded: [run_adversarial_evals]
+    severity: PERSISTENT_BLOCK
+    weight: 3
+    description: 'Adversarial evaluations pass after the last training, before release.'
+    repair: 'Run run_adversarial_evals on the final weights of this model, then release.'
+
+  # Art. 55(1)(c): serious incidents are reported to the AI Office without undue delay.
+  - name: aiact_art55_incident_reported_to_ai_office
+    formula: 'G(now("flag_serious_incident") -> F(now("report_incident_ai_office")))'
+    for_each: incident_id
+    severity: TOLERATE
+    weight: 2
+    description: 'Each serious incident flagged during the run is reported to the AI Office.'
+    repair: 'Call report_incident_ai_office for this incident_id.'
+    applies_to_final_answer: true
+
+  # ── Module 06 · serious incidents (art. 73) ─────────────────────────────
+
+  # Art. 73(2)-(4): a serious incident is notified to the market surveillance authority
+  # (15 days at most, 10 in case of death, 2 for a widespread infringement or a critical
+  # infrastructure disruption).
+  - name: aiact_art73_incident_reported
+    formula: 'G(now("flag_serious_incident") -> F(now("report_serious_incident")))'
+    for_each: incident_id
+    severity: TOLERATE
+    weight: 3
+    description: 'Each serious incident flagged during the run is reported before it ends.'
+    repair: 'Call report_serious_incident for this incident_id (it notifies the compliance officer).'
+    applies_to_final_answer: true
+
+  # Art. 73: reporting comes first: at most five tool calls between detection and report.
+  - name: aiact_art73_report_quickly
+    formula: 'within_steps("flag_serious_incident", "report_serious_incident", 5)'
+    severity: HARD_STOP
+    weight: 3
+    description: 'A serious incident is reported within five tool calls of its detection.'
+    repair: 'Call report_serious_incident now, before anything else.'
+
+  # Art. 73(6): after a serious incident, the system is not altered in a way that could
+  # affect the investigation before the authority is told.
+  - name: aiact_art73_6_preserve_evidence
+    formula: 'G((now("rollback_model") | now("update_model_version") | now("delete_model_artifact")) -> (((!now("flag_serious_incident")) S now("report_serious_incident")) | H(!now("flag_serious_incident"))))'
+    severity: HARD_STOP
+    weight: 3
+    description: 'No rollback, update or artifact deletion between an incident and its report.'
+    repair: 'Report the incident first (report_serious_incident).'
+
+  # ── Module 07 · development team ────────────────────────────────────────
+
+  # Art. 11 and annex IV: the technical documentation describes the deployed version; any
+  # code, model or prompt change makes it stale.
+  - name: aiact_dev_doccheck_after_last_change
+    formula: 'G(now("deploy_prod") -> ((!now("edit_code")) S now("doccheck")))'
+    succeeded: [doccheck]
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'The documentation check passes after the last code change, before production.'
+    repair: 'Update docs/annex-iv, run doccheck until it passes, then deploy.'
+
+  # Art. 15: accuracy, robustness and cybersecurity are measured on the published version.
+  - name: aiact_dev_evals_after_last_change
+    formula: 'G((now("deploy_prod") | now("publish_model")) -> ((!now("edit_code")) S now("run_evals")))'
+    succeeded: [run_evals]
+    severity: PERSISTENT_BLOCK
+    weight: 2
+    description: 'The evaluation suite passes after the last code change, before production or publication.'
+    repair: 'Run run_evals after your last change, until it passes.'
+
+  # Art. 11, 17 and 18: the classification register, the FRIA and the technical
+  # documentation are quality-management records; a human approves their changes.
+  - name: aiact_dev_compliance_register
+    never:
+      tool: [edit_file, write_file, delete_file, move_file]
+      where: {path: {matches: '(^|[/\\])(compliance|docs[/\\]annex(e)?-iv)[/\\]'}}
+    severity: ASK
+    weight: 2
+    description: 'Changes to the compliance register and annex IV documentation are approved by a human.'
+    repair: 'Ask the human to approve this change to the compliance records.'
+
+  # Art. 5(1)(e)-(g) and annex III(1): biometrics and emotion recognition are prohibited or
+  # high risk depending on the context; bringing them into the code is a human decision.
+  - name: aiact_dev_biometric_libraries
+    never:
+      tool: install_package
+      where: {name: {matches: '^(deepface|face[_-]recognition|fer($|[=<>~!\[ ])|insightface|py-feat|hsemotion|face-api|@vladmandic/(face-api|human))'}}
+    severity: ASK
+    weight: 2
+    description: 'Installing a biometric or emotion recognition library is approved by a human.'
+    repair: 'Ask the human to approve this dependency and record why it is needed.'

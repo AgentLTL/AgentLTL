@@ -1,0 +1,56 @@
+# ─────────────────────────────────────────────────────────────────────
+# AI Act · Module 02 — Transparence (art. 50)
+# Applicable depuis le 2 août 2026. Marquage art. 50(2) : 2 décembre 2026
+# pour les systèmes génératifs déjà sur le marché avant le 2 août 2026.
+# ─────────────────────────────────────────────────────────────────────
+rules:
+  - id: aiact-art50-1-divulgation-ia
+    before:
+      first: {tool: mcp__aiact__disclose_ai_interaction, with: {recipient: $r}}
+      then:
+        - {tool: ["mcp__*__send_message", "mcp__*__post_reply", "mcp__*__start_call"], with: {recipient: $r}}
+    scope: project            # une divulgation par interlocuteur, même d'une session à l'autre
+    why: >-
+      Art. 50(1) — une personne qui interagit avec un système d'IA doit en
+      être informée au plus tard lors de la première interaction.
+    fix: Appelez mcp__aiact__disclose_ai_interaction pour ce destinataire, puis envoyez.
+
+  - id: aiact-art50-2-marquage-avant-diffusion
+    before:
+      first: {tool: mcp__aiact__mark_synthetic_content, with: {asset_id: $a}}
+      then:  {tool: ["mcp__*__publish_content", "mcp__*__export_asset", "mcp__*__upload_media"], with: {asset_id: $a}}
+    scope: project
+    why: >-
+      Art. 50(2) — les contenus audio, image, vidéo et texte générés doivent
+      porter un marquage lisible par machine qui permet de détecter leur
+      origine artificielle.
+    fix: Appelez mcp__aiact__mark_synthetic_content sur cet asset_id, puis diffusez.
+
+  - id: aiact-art50-4-hypertrucage-etiquete
+    require: {tool: "mcp__*__publish_media", with: {ai_disclosure: true}}
+    why: >-
+      Art. 50(4) — un hypertrucage (image, audio, vidéo réalistes générés ou
+      manipulés) doit être signalé comme tel au public.
+    fix: Republiez avec ai_disclosure=true (mention visible « généré par IA »).
+    mode: ask                 # l'humain tranche les cas artistiques / satiriques
+
+  - id: aiact-art50-4-texte-interet-public
+    before:
+      first: {tool: mcp__aiact__human_editorial_review, with: {doc_id: $d}}
+      then:  {tool: "mcp__*__publish_article", with: {doc_id: $d, ai_disclosure: false}}
+    scope: project
+    why: >-
+      Art. 50(4) — un texte généré publié pour informer le public sur des
+      questions d'intérêt public doit être signalé comme généré, sauf s'il a
+      fait l'objet d'une revue éditoriale humaine sous responsabilité
+      éditoriale.
+    fix: Publiez avec ai_disclosure=true, ou faites d'abord valider le texte par mcp__aiact__human_editorial_review.
+
+  - id: aiact-art50-3-information-personnes-exposees
+    before:
+      first: {tool: mcp__aiact__inform_exposed_persons, with: {session_id: $s}}
+      then:  {tool: ["mcp__*__emotion_recognition", "mcp__*__detect_emotion", "mcp__*__biometric_categorize"], with: {session_id: $s}}
+    scope: project
+    why: >-
+      Art. 50(3) — les personnes exposées à un système de reconnaissance des
+      émotions ou de catégorisation biométrique doivent en être informées.

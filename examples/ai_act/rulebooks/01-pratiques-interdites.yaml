@@ -1,0 +1,82 @@
+# ─────────────────────────────────────────────────────────────────────
+# AI Act · Module 01 — Pratiques interdites (art. 5)
+# Applicable depuis le 2 février 2025 ; nouvelle interdiction
+# « contenus intimes non consentis / CSAM » applicable le 2 décembre 2026
+# (Omnibus numérique, règlement (UE) 2026/1744).
+# Noms d'outils : noms logiques, à faire correspondre aux outils réels
+# (MCP : mcp__<serveur>__<outil>) — voir la table de correspondance.
+# ─────────────────────────────────────────────────────────────────────
+rules:
+  - id: aiact-art5-1c-notation-sociale
+    never: ["mcp__*__social_score", "mcp__*__compute_social_score", "mcp__*__rank_citizens"]
+    why: >-
+      Art. 5(1)(c) — la notation sociale de personnes conduisant à un
+      traitement défavorable est interdite.
+    mode: stop
+
+  - id: aiact-art5-1e-moissonnage-facial
+    never:
+      - {tool: ["mcp__*__face_index", "mcp__*__build_face_database", "mcp__*__face_embed_bulk"],
+         where: {source: ["web*", "http*", "crawl*", "cctv*", "video_surveillance*"]}}
+    why: >-
+      Art. 5(1)(e) — constituer ou étendre une base de reconnaissance faciale
+      par moissonnage non ciblé d'images d'internet ou de vidéosurveillance
+      est interdit.
+    mode: stop
+
+  - id: aiact-art5-1f-contexte-declare
+    require: {tool: ["mcp__*__emotion_recognition", "mcp__*__detect_emotion"], where: {context: "?*"}}
+    why: >-
+      Art. 5(1)(f) — l'interdiction dépend du contexte d'usage ; tout appel
+      de reconnaissance d'émotions doit déclarer son contexte.
+    fix: Ajoutez l'argument context (ex. medical, safety, marketing...).
+
+  - id: aiact-art5-1f-emotions-travail-education
+    never:
+      - {tool: ["mcp__*__emotion_recognition", "mcp__*__detect_emotion"],
+         where: {context: ["workplace", "employ*", "hr*", "recruit*", "education", "school*", "exam*", "student*"]}}
+    why: >-
+      Art. 5(1)(f) — inférer les émotions d'une personne sur le lieu de
+      travail ou dans l'enseignement est interdit (hors raisons médicales ou
+      de sécurité, qui relèvent d'une décision humaine documentée).
+    mode: stop
+
+  - id: aiact-art5-1g-categorisation-biometrique
+    never:
+      - {tool: ["mcp__*__biometric_categorize", "mcp__*__infer_attributes_from_face"],
+         where: {attribute: ["race*", "ethnic*", "politic*", "union*", "relig*", "belief*", "philosoph*", "sex_life*", "sexual_orient*"]}}
+    why: >-
+      Art. 5(1)(g) — déduire de données biométriques l'origine, les opinions,
+      l'appartenance syndicale, les convictions ou l'orientation sexuelle est
+      interdit.
+    mode: stop
+
+  - id: aiact-art5-1h-identification-temps-reel
+    never: {tool: "mcp__*__remote_biometric_identify", with: {realtime: true}}
+    why: >-
+      Art. 5(1)(h) — l'identification biométrique à distance en temps réel
+      dans l'espace public est interdite, sauf exceptions répressives
+      soumises à autorisation judiciaire : jamais à l'initiative d'un agent.
+    mode: stop
+
+  - id: aiact-art5-1d-prediction-penale-profilage
+    never:
+      - {tool: ["mcp__*__predict_offence_risk", "mcp__*__crime_risk_score"],
+         where: {basis: ["profil*", "personality*", "traits*"]}}
+    why: >-
+      Art. 5(1)(d) — évaluer le risque qu'une personne commette une infraction
+      sur la seule base de son profilage ou de ses traits de personnalité est
+      interdit.
+    mode: stop
+
+  - id: aiact-art5-ncii-csam-controle-prealable
+    before:
+      first: {tool: mcp__aiact__content_safety_check, with: {request_id: $r}}
+      then:  {tool: ["mcp__*__generate_image", "mcp__*__generate_video", "mcp__*__edit_image", "mcp__*__edit_video"], with: {request_id: $r}}
+    why: >-
+      Art. 5 (ajout Omnibus, applicable le 2 décembre 2026) — générer des
+      contenus intimes non consentis ou des contenus pédopornographiques est
+      interdit ; chaque demande de génération passe d'abord par le contrôle
+      de sécurité.
+    fix: Appelez mcp__aiact__content_safety_check avec le même request_id, puis générez.
+    mode: stop

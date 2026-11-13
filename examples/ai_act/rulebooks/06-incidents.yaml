@@ -1,0 +1,27 @@
+# ─────────────────────────────────────────────────────────────────────
+# AI Act · Module 06 — Incidents graves et surveillance (art. 72, 73)
+# ─────────────────────────────────────────────────────────────────────
+rules:
+  - id: aiact-art73-signalement-avant-cloture
+    finally: {call: mcp__aiact__report_serious_incident, since: mcp__aiact__flag_serious_incident}
+    why: >-
+      Art. 73 — un incident grave est notifié à l'autorité de surveillance
+      (au plus tard 15 jours, 10 jours en cas de décès, 2 jours en cas
+      d'atteinte généralisée ou d'infrastructure critique).
+    fix: Appelez mcp__aiact__report_serious_incident (il prévient le responsable conformité).
+
+  - id: aiact-art73-signalement-rapide
+    ltl: 'within_steps("mcp__aiact__flag_serious_incident", "mcp__aiact__report_serious_incident", 5)'
+    why: >-
+      Art. 73 — le signalement passe avant toute autre action : au plus
+      cinq appels d'outil entre la détection et le signalement.
+
+  - id: aiact-art73-6-preservation-preuves
+    ltl: 'G((now("mcp__mlops__rollback_model") | now("mcp__mlops__update_model_version") | now("mcp__mlops__delete_model_artifact")) -> (((!now("mcp__aiact__flag_serious_incident")) S now("mcp__aiact__report_serious_incident")) | H(!now("mcp__aiact__flag_serious_incident"))))'
+    scope: project
+    why: >-
+      Art. 73(6) — après un incident grave, on ne modifie pas le système
+      d'une manière qui fausserait l'enquête avant d'en avoir informé
+      l'autorité.
+    fix: Signalez d'abord l'incident (mcp__aiact__report_serious_incident).
+    mode: stop
